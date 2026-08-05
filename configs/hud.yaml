@@ -1,0 +1,34 @@
+hud:
+  enabled: true
+  position: top-right
+  size: 220
+  margin: 12
+  range_m: 6.0
+  panel_alpha: 0.45
+  grid_lines: 5
+  grid_thickness: 1
+  grid_color: [200, 200, 200]
+  trail:
+    seconds: 20
+    points: 600
+    color: [255, 255, 0]
+    thickness: 2
+    marker_radius: 2
+  rov:
+    color: [255, 255, 255]
+    radius: 4
+  arrow:
+    length: 28
+    thickness: 2
+    color: [0, 255, 0]
+  text:
+    color: [255, 255, 255]
+    shadow_color: [0, 0, 0]
+    scale: 0.45
+    thickness: 1
+  sim:
+    enabled: true
+    speed_mps: 0.6
+    turn_rate_degps: 20.0
+    depth_rate_mps: 0.05
+    start_yaw_deg: 45.0
