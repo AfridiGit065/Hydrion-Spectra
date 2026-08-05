@@ -4,24 +4,25 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-import yaml
-
 from PySide6.QtWidgets import QApplication
 
 from modules.camera.camera_manager import CameraManager
+from modules.config.config_manager import ConfigManager
+from modules.logger.logger_manager import LoggerManager
 from ui.hud import HudOverlay, SimulatedHudProvider
 from ui.main_window import MainWindow
 
 
-def load_config(name):
-    path = os.path.join(PROJECT_ROOT, "configs", name)
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-
 def main():
-    camera_config = load_config("camera.yaml").get("camera", {})
-    hud_config = load_config("hud.yaml")
+    config_manager = ConfigManager()
+    config_manager.initialize()
+
+    logger_manager = LoggerManager(level=config_manager.get("logger", "level", "INFO"))
+    logger_manager.initialize()
+    log = logger_manager.get_logger("app")
+
+    camera_config = config_manager.get_section("camera")
+    hud_config = config_manager.get_section("hud")
 
     app = QApplication(sys.argv)
 
@@ -35,6 +36,7 @@ def main():
     window = MainWindow(camera, overlay=overlay, hud_provider=hud_provider)
     window.show()
 
+    log.info("Main window shown, entering event loop")
     return app.exec()
 
 

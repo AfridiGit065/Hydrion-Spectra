@@ -18,14 +18,14 @@ class CameraManager(BaseModule):
 
         self.capture = cv2.VideoCapture(device)
         if not self.capture.isOpened():
-            print("[Camera] Failed to open camera device")
+            self.logger.error("Failed to open camera device")
             self.capture = None
             return
 
         self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.capture.set(cv2.CAP_PROP_FPS, fps)
-        print(f"[Camera] Camera opened (device {device})")
+        self.logger.info("Camera opened (device %s)", device)
 
     def read_frame(self):
         if self.capture is None:
@@ -40,4 +40,4 @@ class CameraManager(BaseModule):
         if self.capture is not None:
             self.capture.release()
             self.capture = None
-            print("[Camera] Camera released")
+            self.logger.info("Camera released")

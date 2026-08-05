@@ -1,3 +1,6 @@
+import logging
+
+
 class BaseModule:
     """
     Base class for all ROV modules.
@@ -7,21 +10,22 @@ class BaseModule:
     def __init__(self, name):
         self.name = name
         self.running = False
+        self.logger = logging.getLogger(name)
 
     def initialize(self):
-        print(f"[{self.name}] Initialized")
+        self.logger.info("Initialized")
 
     def start(self):
         self.running = True
-        print(f"[{self.name}] Started")
+        self.logger.info("Started")
 
     def update(self):
         if self.running:
-            print(f"[{self.name}] Updating...")
+            self.logger.debug("Updating...")
 
     def stop(self):
         self.running = False
-        print(f"[{self.name}] Stopped")
+        self.logger.info("Stopped")
 
     def health_check(self):
-        print(f"[{self.name}] Health: OK")
+        self.logger.info("Health: OK")
