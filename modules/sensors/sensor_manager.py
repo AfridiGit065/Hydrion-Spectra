@@ -9,6 +9,7 @@ class HudState:
     x: float = 0.0
     y: float = 0.0
     depth: float = 0.0
+    alt: float = 5.2
     yaw_deg: float = 0.0
 
 
@@ -16,7 +17,12 @@ class SimulatedSensorProvider:
     """Reports the vehicle state; motion is applied by the simulated thrusters."""
 
     def __init__(self, config):
-        self.state = HudState(yaw_deg=config.get("sim", {}).get("start_yaw_deg", 45.0))
+        sim = config.get("sim", {})
+        self._seabed = sim.get("seabed_depth_m", 5.2)
+        self.state = HudState(
+            yaw_deg=sim.get("start_yaw_deg", 45.0),
+            alt=self._seabed,
+        )
 
     def get_state(self):
         return self.state
@@ -26,6 +32,7 @@ class SimulatedSensorProvider:
         self.state.x += (surge * math.sin(rad) + sway * math.cos(rad)) * dt
         self.state.y += (surge * math.cos(rad) - sway * math.sin(rad)) * dt
         self.state.depth -= heave * dt
+        self.state.alt = max(0.0, self._seabed - self.state.depth)
         self.state.yaw_deg = (self.state.yaw_deg + yaw_rate * dt) % 360.0
 
 

@@ -15,10 +15,11 @@ Build a modular ROV software stack that:
 - Streams live camera video.
 - Later: telemetry, sensors (IMU/depth/compass), thrusters, navigation, failsafe, logging, mission.
 
-Current milestone reached: **A driveable simulated ROV — live camera + HUD mini-map fed by the
-sensors module, telemetry link streaming frames + heartbeats, and full manual motion control
-(3D pad + keyboard + link commands) driving the thrusters, so the vehicle only moves when you
-command it.**
+Current milestone reached: **A Hydrion Spectra GCS-style control station — a "Dark Ocean"
+glassmorphism shell (top app bar, collapsible left nav rail, bottom system footer) around a
+camera-first dashboard with live telemetry, plus working module pages (Sensors, Diagnostics,
+Logs, Settings, Operations) and placeholders for future sections (Navigation, Manipulator,
+Planner, AI Vision).**
 
 ---
 
@@ -42,13 +43,18 @@ rov-controller/
 │   ├── controller/      # controller.py — REAL (MotionState merge: pad/keyboard/link/gamepad)
 │   ├── thrusters/       # thruster_manager.py — REAL (mixing matrix + simulated provider)
 │   ├── navigation/  mission/  manipulator/  watchdog/  diagnostics/   # empty
-├── ui/                  # GUI
-│   ├── main_window.py   # MainWindow — REAL (camera view + status bar + HUD hook + keys)
-│   ├── control_pad.py   # ControlPad3D — REAL (3-axis pad, bottom-right of camera)
-│   └── hud.py           # HUD overlay — REAL (mini-map + trail + heading)
+├── ui/                  # GUI (Hydrion Spectra GCS "Dark Ocean" style)
+│   ├── main_window.py   # MainWindow — REAL (app bar + nav rail + footer + workspaces)
+│   ├── theme.py         # design tokens (colors/fonts from DESIGN.md) + global QSS
+│   ├── glass.py         # GlassPanel / StatusPill / NavButton / ValueRow widgets
+│   ├── control_pad.py   # ControlPad3D — REAL (circular joystick + yaw ring, bottom-right)
+│   ├── sonar.py         # SonarPanel — REAL (top-right glass map: ship/cable/ROV/ping)
+│   ├── hud.py           # HUD overlay — REAL (compass + crosshair + DEPTH/ALT pillars)
+│   └── sections.py      # nav pages — REAL (Sensors/Diagnostics/Logs/Settings/Operations) + placeholders
 ├── configs/             # YAML configs
 │   ├── camera.yaml      # camera settings (device/width/height/fps/enabled)
-│   ├── hud.yaml         # HUD settings (size/colors/trail)
+│   ├── hud.yaml         # HUD settings (panel alpha + compass/crosshair/depth-alt + colors)
+│   ├── gcs.yaml         # GCS shell (sonar map + telemetry sim values + latency)
 │   ├── sensors.yaml     # sensor settings (provider/start heading)
 │   ├── network.yaml     # link settings (enabled/link/ip/port/intervals)
 │   ├── controller.yaml  # keymap + gamepad codemap
@@ -96,19 +102,27 @@ python app/main.py
 Expected behavior:
 
 1. Console prints `[Camera] Camera opened (device 0)`.
-2. A window **"Underwater ROV Controller"** opens:
-   - Left: "Telemetry Panel (Placeholder)".
-   - Center: live camera feed, with the 3D **control pad** overlaid bottom-right (joystick +
-     heave slider).
-   - Top-right: HUD mini-map overlay (grid, ROV dot, cyan trail, heading arrow, DEPTH/HDG labels).
-   - Status bar: `Status: Camera Connected | FPS: -- | Mode: Manual`.
+2. A window **"HYDRION SPECTRA - ROV Controller"** opens (dark navy "Dark Ocean" theme):
+   - **Top app bar:** brand, WORKSPACE tab, status pills (BATT / LINK / UP time / MANUAL), avatar.
+   - **Left nav rail** (expands on hover): Dashboard, Operations, Navigation, Sensors,
+     Manipulator, Diagnostics, Planner, AI Vision, Logs, Settings, and a red LAUNCH MISSION button.
+   - **Dashboard:** camera fills the center with overlays — LIVE indicator (top-left), sonar map
+     (top-right), system telemetry (below the map), compass + crosshair + DEPTH/ALT pillars drawn
+     into the video, control dock (ARMED/REC/SNAP/LIGHTS, bottom-center), circular motion controller
+     (bottom-right), hidden mission-log flyout (left edge).
+   - **Bottom footer:** FPS / CPU / RAM / STORAGE / DEPTH / LATENCY.
+   - The module pages (Sensors, Diagnostics, Logs, Settings, Operations) show real data from the
+     modules; Navigation/Manipulator/Planner/AI Vision are placeholders.
 3. Drive the simulated ROV (see §5 "Manual control" for the full table):
-   - **Pad:** drag the joystick (surge/sway), drag the slider (heave) — springs back on release.
+   - **Pad:** drag the circular stick (surge/sway) — springs back on release; the dashed ring
+     spins while turning.
    - **Keyboard:** `W/S/A/D/R/F` forward/back/strafe/up/down, `Q/E` turn, `I/K` pitch, `J/L` roll,
-     `Shift` boost, `Backspace` kill. The HUD trail now moves only while you hold a key.
+     `Shift` boost, `Backspace` kill. Keys are ignored while typing in a text field.
    - **Link:** from the surface console, `inject_command("FORWARD 0.5")` → the controller consumes it.
 4. Telemetry + heartbeat frames are appended to `logs/mission.log` (JSON, one per line).
-5. Closing the window releases the camera and closes the link cleanly.
+5. `SNAP` saves a frame to `logs/snapshots/`; `LIGHTS` brightens the feed; `ARMED` toggles whether
+   any input moves the ROV.
+6. Closing the window releases the camera and closes the link cleanly.
 
 If no camera is available, status shows "No Camera Signal" (no crash).
 
@@ -157,12 +171,27 @@ If no camera is available, status shows "No Camera Signal" (no crash).
   applies them via a provider. `SimulatedThrusterProvider` converts setpoints into motion and feeds
   `SensorManager.apply_motion()`, so the HUD trail + telemetry respond to commands. Unknown
   `provider` config falls back to simulated.
-- `ui/control_pad.py` — `ControlPad3D`: interactive 3-axis pad (joystick = surge/sway, slider =
-  heave), overlaid bottom-right of the camera feed; emits `MotionState` on drag.
+- `ui/control_pad.py` — `ControlPad3D`: circular glass motion controller (stick = surge/sway with
+  spring-return, animated dashed yaw ring updated from the keyboard yaw command); emits
+  `MotionState` on drag.
+- `ui/theme.py` — design tokens (colors, fonts) from the Stitch `DESIGN.md` + the global
+  "Dark Ocean" stylesheet applied via `apply_theme(qt_app)`.
+- `ui/glass.py` — reusable widgets: `GlassPanel`, `StatusPill`, `NavButton`, `ValueRow`,
+  `IconTile`, `SectionPage`.
+- `ui/sonar.py` — `SonarPanel`: glass map (ship, dashed umbilical, ROV triangle, animated sonar
+  ping) fed from the sensor state.
+- `ui/hud.py` — HUD overlays drawn into the video frame: heading compass (top-center), crosshair +
+  pitch ladder (center), DEPTH/ALT pillars (left/right middle).
+- `ui/sections.py` — nav-rail pages: **Sensors** (depth/heading/position/pitch/roll + health),
+  **Diagnostics** (per-module `health_check()` pills, FPS/CPU/RAM/uptime), **Logs** (tails
+  `mission.log` + `system.log`), **Settings** (config values), **Operations** (ARM status + link
+  command injector); placeholders for Navigation/Manipulator/Planner/AI Vision.
 - `app/main.py` — thin entry point: `Application().run()`.
-- `ui/main_window.py` — `MainWindow(QMainWindow)`: layout (left panel + camera view + status bar),
-  `QTimer` polling camera at ~30 fps, converts BGR → QImage → QPixmap, calls HUD overlay before
-  display, hosts the `ControlPad3D` overlay, and captures keyboard shortcuts app-wide (event filter)
+- `ui/main_window.py` — `MainWindow(QMainWindow)`: the GCS shell — top app bar (brand + status
+  pills), hover-expanding left nav rail, bottom footer (FPS/CPU/RAM/STORAGE/DEPTH/LATENCY), and a
+  stacked workspace. The Dashboard fills the camera (center-cropped to cover), with overlays:
+  LIVE pill, sonar map, system telemetry, control dock (ARMED/REC/SNAP/LIGHTS), motion controller,
+  and a hidden mission-log flyout. Keyboard shortcuts are captured app-wide via an event filter
   for all movement axes + boost + kill.
 - `ui/hud.py` — HUD overlay (see section 6).
 
@@ -170,10 +199,12 @@ If no camera is available, status shows "No Camera Signal" (no crash).
 
 | Input | What it drives | Status |
 |-------|---------------|--------|
-| `ControlPad3D` (mouse) | surge / sway / heave | ✅ live |
+| `ControlPad3D` (mouse) | surge / sway (+ yaw ring indicator) | ✅ live |
 | Keyboard (`configs/controller.yaml` `keymap`) | all 6 axes + boost + kill | ✅ live |
 | Gamepad (codemap in `controller.yaml` `gamepad`) | mapped axes/buttons | ⏳ future provider |
 | Link commands (`FORWARD`, `LEFT`, …) | same motion target | ✅ live |
+
+Heave (up/down) is on the keyboard (**R/F**); the circular pad drives surge/sway.
 
 Default keys: **W/S** forward/back, **A/D** strafe, **R/F** up/down, **Q/E** turn, **I/K** pitch,
 **J/L** roll, **Shift** boost, **Backspace** kill (toggle). All reassignable in
@@ -189,29 +220,35 @@ Default keys: **W/S** forward/back, **A/D** strafe, **R/F** up/down, **Q/E** tur
 
 ---
 
-## 6. HUD Mini-Map Overlay (ui/hud.py)
+## 6. HUD Overlays (ui/hud.py + ui/sonar.py)
 
-Top-right 2D local plan-view overlay drawn onto the video frame with OpenCV (before QImage conversion).
+The dashboard HUD is split in two: **frame overlays** drawn into the video with OpenCV
+(`ui/hud.py`) and the **sonar map** drawn as a Qt glass widget (`ui/sonar.py`) so it stays
+aligned with the shell panels.
 
-### Components
-- **Panel**: 220x220 px (config), semi-transparent dark background (`panel_alpha`), cached grid.
-- **Grid**: light-gray thin lines (`grid_lines` cells per side), cached for performance.
-- **ROV marker**: white dot at map center.
-- **Trail**: cyan polyline of last `N` position samples using a ring buffer
-  (`collections.deque(maxlen=points)`).
-- **Heading arrow**: green arrow from ROV marker at compass yaw.
-- **Labels**: `DEPTH xx.xx m` and `HDG xxx°` in a small translucent strip below the map, with drop shadow.
+### Frame overlays (ui/hud.py) — drawn before QImage conversion
+- **Compass** (top-center): glass pill with the current heading ± 20°; current value highlighted.
+- **Crosshair + pitch ladder** (center): circle + tick marks and +10/−10 pitch lines.
+- **DEPTH pillar** (left-middle) and **ALT pillar** (right-middle): vertical glass cards with the
+  depth (real) and a sample altitude.
+- Panels use a rounded-rect alpha mask; every overlay is toggleable via `configs/hud.yaml`
+  (`compass` / `crosshair` / `depth_alt` / `colors`).
+
+### Sonar map (ui/sonar.py) — Qt widget, top-right
+- Glass panel with a "SONAR MAP" header, faint grid, the surface ship (blue dot), a dashed
+  umbilical from ship to ROV, the ROV (cyan triangle) at the live `x/y` position, and an animated
+  expanding sonar ping. Sized/tuned in `configs/gcs.yaml` (`sonar` section).
 
 ### Coordinate frame
-- Local **ENU**, origin at launch. Map is world-fixed (north-up).
-- ROV pinned at map center; trail points are translated relative to current position.
-- Heading arrow: screen angle = `-yaw` (screen Y is down), arrow tip = `center + (sin yaw, -cos yaw) * length`.
+- Local **ENU**, origin at launch. Sonar map is north-up; the ROV is placed at
+  `center + (x, -y) * px_per_m`, clamped to the panel.
 
 ### Data flow
 ```
 SensorManager.get_state()          # module -> provider (SimulatedSensorProvider today)
   ->  HudState(x, y, depth, yaw_deg)
-HudOverlay.render(frame, state)   ->  frame with overlay
+HudOverlay.render(frame, state)   ->  frame with overlay        (ui/hud.py)
+SonarPanel.set_state(state)       ->  repaint of the map widget (ui/sonar.py)
 ```
 `HudState` is a dataclass (defined in `modules/sensors/sensor_manager.py`): `x` (East m),
 `y` (North m), `depth` (m), `yaw_deg` (0 = North, CW+).
@@ -227,28 +264,31 @@ names; today that's `simulated`. To attach real hardware later:
 - Real sources map to `HudState`: `yaw_deg` ← IMU/compass heading; `depth` ← pressure/depth sensor;
   `x, y` ← integrate velocity (vx·dt, vy·dt) into local XY from launch, or use a position estimate.
 
-Nothing in `HudOverlay` or `MainWindow` changes — only the provider behind the module.
+Nothing in `HudOverlay`, `SonarPanel` or `MainWindow` changes — only the provider behind the module.
 
 ### Performance
-Background (panel + grid) is pre-rendered once and cached per frame size; only dynamic elements are
-drawn each frame. Measured headless: **~109 FPS** for sim + render (target ≥30 FPS).
+Frame overlays only re-compute masks on size changes; dynamic elements are drawn each frame.
+Measured headless: well above 30 FPS for sim + render.
 
 ### Config reference (`configs/hud.yaml`)
 | Key | Meaning | Default |
 |-----|---------|---------|
 | `enabled` | master switch | `true` |
-| `size` | mini-map side length (px) | `220` |
-| `margin` | gap from frame edges (px) | `12` |
-| `range_m` | half-width shown on map (m) | `6.0` |
-| `panel_alpha` | background opacity | `0.45` |
-| `grid_lines` | grid cells per side | `5` |
-| `trail.seconds` / `trail.points` | trail window; ring buffer maxlen | `20` / `600` |
-| `trail.color` (BGR) | cyan | `[255, 255, 0]` |
-| `arrow.length` / `arrow.thickness` / `arrow.color` | heading arrow | `28` / `2` / green |
-| `rov.color` / `rov.radius` | ROV marker | white / `4` |
-| `text.*` | label font size/color | see file |
+| `panel_alpha` | glass panel opacity | `0.55` |
+| `compass.enabled` | top-center heading pill | `true` |
+| `crosshair.enabled` | center crosshair + pitch ladder | `true` |
+| `depth_alt.enabled` | DEPTH/ALT side pillars | `true` |
+| `colors.primary` (RGB) | ocean-cyan accent `#64FFDA` | `[100, 255, 218]` |
+| `colors.secondary` (RGB) | electric-blue `#adc7ff` | `[173, 199, 255]` |
 
-All colors in the YAML are **BGR** (OpenCV convention).
+### Config reference (`configs/gcs.yaml`)
+| Key | Meaning | Default |
+|-----|---------|---------|
+| `latency_ms` | footer LATENCY + link pill | `12` |
+| `sonar.size` / `range_m` / `grid_lines` | sonar map size & tuning | `220` / `6.0` / `6` |
+| `telemetry.*` | sample bus voltage / current / temp / leak (swap for real telemetry later) | see file |
+
+Colors in `hud.yaml` are RGB values; the overlay converts them to BGR (OpenCV convention).
 
 Simulated motion/rate parameters (`speed_mps`, `turn_rate_degps`, `depth_rate_mps`, `start_yaw_deg`)
 moved to `configs/sensors.yaml` under `sensors.sim.*`.
@@ -325,6 +365,30 @@ Whenever a feature is added, the README must also document:
 
 ### Change record (most recent first)
 
+- **2026-08-06 — UI: Hydrion Spectra GCS redesign (matches `stitch_hydrion_spectra_gcs/` design)**
+  - The whole GUI is now a "Dark Ocean" glassmorphism control station derived from the Stitch
+    screens (see `stitch_hydrion_spectra_gcs/hydrion_spectra_gcs/DESIGN.md` for the design system).
+  - `ui/theme.py` (new) — design tokens + global QSS, applied in `Application.run()`.
+  - `ui/glass.py` (new) — `GlassPanel` / `StatusPill` / `NavButton` / `ValueRow` / `SectionPage`.
+  - `ui/main_window.py` — rewritten into the GCS shell: top app bar (brand + BATT/LINK/UP/MANUAL
+    pills), hover-expanding left nav rail (Dashboard/Operations/Navigation/Sensors/Manipulator/
+    Diagnostics/Planner/AI Vision/Logs/Settings + LAUNCH MISSION), bottom footer (FPS/CPU/RAM/
+    STORAGE/DEPTH/LATENCY), stacked workspaces. Dashboard = full-bleed camera (center-cropped to
+    cover) with overlays: LIVE pill, control dock (ARMED/REC/SNAP/LIGHTS), motion controller,
+    mission-log flyout. Keyboard shortcuts ignore typing widgets. ARM state gates all motion input;
+    SNAP saves frames to `logs/snapshots/`; LIGHTS brightens the feed.
+  - `ui/control_pad.py` — circular glass motion controller (stick = surge/sway, animated yaw ring).
+  - `ui/sonar.py` (new) — `SonarPanel` glass map (ship / dashed umbilical / ROV triangle / sonar
+    ping), fed live from sensor state.
+  - `ui/hud.py` — replaced the trail mini-map with compass + crosshair/pitch-ladder + DEPTH/ALT
+    pillars (all toggleable in `configs/hud.yaml`).
+  - `ui/sections.py` (new) — nav pages: Sensors, Diagnostics, Logs, Settings, Operations are real;
+    Navigation/Manipulator/Planner/AI Vision are styled placeholders until those modules exist.
+  - `configs/hud.yaml` rewritten + `configs/gcs.yaml` (new) — shell/sonar/telemetry sample values.
+  - `modules/controller/controller.py` — added `last_motion` (exposes commanded pitch/roll/boost to
+    the UI).
+  - Verified headless: all 10 sections switch, keyboard forward moves the sim, disarm holds,
+    pad drag emits sway, SNAP writes a file, boot clean (exit 124 = running).
 - **2026-08-06 — Step 5: Thrusters / motion (manual 3D control, keyboard, gamepad codemap)**
   - `modules/controller/controller.py` — `ControllerModule(BaseModule)` + `MotionState`
     (surge/sway/heave/yaw/pitch/roll/boost). Merges input sources per-axis (strongest wins), handles

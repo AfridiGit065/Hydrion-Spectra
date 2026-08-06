@@ -100,6 +100,7 @@ class TelemetryManager(BaseModule):
             state = self.sensors.get_state()
             payload.update(
                 depth=round(state.depth, 2),
+                alt=round(state.alt, 2),
                 yaw_deg=round(state.yaw_deg, 1),
                 x=round(state.x, 2),
                 y=round(state.y, 2),

@@ -40,6 +40,7 @@ class ControllerModule(BaseModule):
         self.thrusters = thrusters
         self._inputs = {}
         self._killed = False
+        self.last_motion = MotionState()
 
     def set_input(self, source, motion):
         self._inputs[source] = motion
@@ -47,6 +48,10 @@ class ControllerModule(BaseModule):
     def kill(self):
         self._killed = True
         self.logger.warning("KILL received; motion stopped until toggle")
+
+    def recover(self):
+        self._killed = False
+        self.logger.info("KILL cleared; motion re-enabled")
 
     def _merge_inputs(self):
         merged = MotionState()
@@ -78,7 +83,7 @@ class ControllerModule(BaseModule):
                 continue
         if tokens[0] in COMMANDS:
             axis, direction = COMMANDS[tokens[0]]
-            state = self._inputs.get("link", MotionState())
+            state = MotionState()
             setattr(state, axis, direction * magnitude)
             self._inputs["link"] = state
             self._killed = False
@@ -96,6 +101,7 @@ class ControllerModule(BaseModule):
             motion = self._merge_inputs()
         if self.thrusters is not None:
             self.thrusters.set_motion(motion)
+        self.last_motion = motion
 
     def health_check(self):
         return self.thrusters is not None

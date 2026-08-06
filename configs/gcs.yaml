@@ -1,0 +1,12 @@
+gcs:
+  latency_ms: 12
+  sonar:
+    enabled: true
+    size: 220
+    range_m: 6.0
+    grid_lines: 6
+  telemetry:
+    bus_voltage: 48.2
+    total_current: 12.4
+    int_temp: 24.0
+    leak_status: SAFE

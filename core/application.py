@@ -13,6 +13,7 @@ from modules.telemetry.telemetry_manager import TelemetryManager
 from modules.thrusters.thruster_manager import ThrusterManager
 from ui.hud import HudOverlay
 from ui.main_window import MainWindow
+from ui.theme import apply_theme
 
 
 class Application:
@@ -76,6 +77,7 @@ class Application:
         camera = self.service_manager.get("Camera")
         sensors = self.service_manager.get("Sensors")
         controller = self.service_manager.get("Controller")
+        telemetry = self.service_manager.get("Telemetry")
         keymap = self.config_manager.get_section("controller").get("keymap", {})
         return MainWindow(
             camera,
@@ -83,11 +85,17 @@ class Application:
             hud_provider=sensors,
             controller=controller,
             keymap=keymap,
+            service_manager=self.service_manager,
+            config_manager=self.config_manager,
+            telemetry=telemetry,
+            log_dir=self.logger_manager.log_dir,
+            gcs_config=self.config_manager.get_section("gcs") or {},
         )
 
     def run(self):
         self.initialize()
         self.qt_app = QApplication(self.argv)
+        apply_theme(self.qt_app)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.service_manager.update_all)
         self.update_timer.start(100)
