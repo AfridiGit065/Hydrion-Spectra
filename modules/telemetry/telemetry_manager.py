@@ -71,6 +71,7 @@ class TelemetryManager(BaseModule):
         )
         self._last_frame = 0.0
         self._last_heartbeat = 0.0
+        self._commands = deque()
 
     def initialize(self):
         super().initialize()
@@ -120,7 +121,13 @@ class TelemetryManager(BaseModule):
             self.link.send(self._frame("heartbeat"))
 
         for command in self.link.receive():
+            self._commands.append(command)
             self.logger.info("Command received: %s", command)
+
+    def consume_commands(self):
+        commands = list(self._commands)
+        self._commands.clear()
+        return commands
 
     def stop(self):
         super().stop()

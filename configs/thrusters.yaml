@@ -1,0 +1,8 @@
+thrusters:
+  enabled: true
+  provider: simulated
+  speed_mps: 0.8
+  turn_rate_degps: 60.0
+  layout:
+    horizontal: [FL, FR, BL, BR]
+    vertical: [VT1, VT2]

@@ -6,9 +6,11 @@ from PySide6.QtWidgets import QApplication
 from core.service_manager import ServiceManager
 from modules.camera.camera_manager import CameraManager
 from modules.config.config_manager import ConfigManager
+from modules.controller.controller import ControllerModule
 from modules.logger.logger_manager import LoggerManager
 from modules.sensors.sensor_manager import SensorManager
 from modules.telemetry.telemetry_manager import TelemetryManager
+from modules.thrusters.thruster_manager import ThrusterManager
 from ui.hud import HudOverlay
 from ui.main_window import MainWindow
 
@@ -35,30 +37,52 @@ class Application:
         self.service_manager.start_all()
 
     def _build_modules(self):
-        camera_config = self.config_manager.get_section("camera")
+        camera = None
+        sensors = None
         if self.config_manager.get("camera", "enabled", True):
-            self.service_manager.register(CameraManager(camera_config))
+            camera = CameraManager(self.config_manager.get_section("camera"))
+            self.service_manager.register(camera)
         if self.config_manager.get("sensors", "enabled", True):
-            self.service_manager.register(
-                SensorManager(self.config_manager.get_section("sensors"))
-            )
+            sensors = SensorManager(self.config_manager.get_section("sensors"))
+            self.service_manager.register(sensors)
+
+        telemetry = None
         if self.config_manager.get("network", "enabled", True):
+            telemetry = TelemetryManager(
+                self.config_manager.get_section("network"),
+                sensors=sensors,
+                camera=camera,
+            )
+            self.service_manager.register(telemetry)
+
+        thrusters = None
+        if self.config_manager.get("thrusters", "enabled", True):
+            thrusters = ThrusterManager(
+                self.config_manager.get_section("thrusters"), sensors=sensors
+            )
+        if self.config_manager.get("controller", "enabled", True):
             self.service_manager.register(
-                TelemetryManager(
-                    self.config_manager.get_section("network"),
-                    sensors=self.service_manager.get("Sensors"),
-                    camera=self.service_manager.get("Camera"),
+                ControllerModule(
+                    self.config_manager.get_section("controller"),
+                    telemetry=telemetry,
+                    thrusters=thrusters,
                 )
             )
+        if thrusters is not None:
+            self.service_manager.register(thrusters)
 
     def create_window(self):
         hud_config = {"hud": self.config_manager.get_section("hud")}
         camera = self.service_manager.get("Camera")
         sensors = self.service_manager.get("Sensors")
+        controller = self.service_manager.get("Controller")
+        keymap = self.config_manager.get_section("controller").get("keymap", {})
         return MainWindow(
             camera,
             overlay=HudOverlay(hud_config),
             hud_provider=sensors,
+            controller=controller,
+            keymap=keymap,
         )
 
     def run(self):

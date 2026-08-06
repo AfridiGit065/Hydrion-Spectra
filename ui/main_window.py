@@ -1,7 +1,8 @@
 import cv2
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -11,13 +12,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from modules.controller.controller import MotionState
+from ui.control_pad import ControlPad3D
+
 
 class MainWindow(QMainWindow):
-    def __init__(self, camera_manager, overlay=None, hud_provider=None):
+    def __init__(self, camera_manager, overlay=None, hud_provider=None,
+                 controller=None, keymap=None):
         super().__init__()
         self.camera = camera_manager
         self.overlay = overlay
         self.hud_provider = hud_provider
+        self.controller = controller
+        self.key_speed = 1.0
+        self._pressed_actions = set()
+        self._key_actions = self._build_keymap(keymap or {})
         self.setWindowTitle("Underwater ROV Controller")
         self.resize(1280, 720)
 
@@ -26,6 +35,18 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_camera)
         self.timer.start(33)
+
+        QApplication.instance().installEventFilter(self)
+
+    def _build_keymap(self, keymap):
+        actions = {}
+        for action, name in keymap.items():
+            if name is None:
+                continue
+            key = getattr(Qt.Key, f"Key_{name}", None)
+            if key is not None:
+                actions[key] = action
+        return actions
 
     def _build_ui(self):
         central = QWidget()
@@ -39,8 +60,8 @@ class MainWindow(QMainWindow):
         self.left_panel.setMinimumWidth(220)
         self.left_panel.setWordWrap(True)
 
-        camera_box = QWidget()
-        camera_layout = QVBoxLayout(camera_box)
+        self.camera_container = QWidget()
+        camera_layout = QVBoxLayout(self.camera_container)
         camera_layout.setContentsMargins(0, 0, 0, 0)
 
         self.camera_view = QLabel("LIVE CAMERA FEED")
@@ -51,8 +72,14 @@ class MainWindow(QMainWindow):
         self.camera_view.setMinimumSize(640, 480)
         camera_layout.addWidget(self.camera_view)
 
+        self.pad = ControlPad3D(self.camera_container)
+        if self.controller is not None:
+            self.pad.motionChanged.connect(
+                lambda motion: self.controller.set_input("pad", motion)
+            )
+
         root.addWidget(self.left_panel)
-        root.addWidget(camera_box, 1)
+        root.addWidget(self.camera_container, 1)
 
         self.setCentralWidget(central)
 
@@ -64,6 +91,52 @@ class MainWindow(QMainWindow):
         status.addWidget(self.status_label)
         status.addPermanentWidget(self.fps_label)
         status.addPermanentWidget(self.mode_label)
+
+        self._reposition_pad()
+
+    def _reposition_pad(self):
+        self.pad.move(
+            self.camera_container.width() - self.pad.width() - 8,
+            self.camera_container.height() - self.pad.height() - 8,
+        )
+        self.pad.raise_()
+
+    def _axis(self, action_pos, action_neg):
+        return ((action_pos in self._pressed_actions) - (action_neg in self._pressed_actions)) \
+            * self.key_speed
+
+    def _keyboard_state(self):
+        return MotionState(
+            surge=self._axis("forward", "back"),
+            sway=self._axis("right", "left"),
+            heave=self._axis("up", "down"),
+            yaw=self._axis("yaw_right", "yaw_left"),
+            pitch=self._axis("pitch_up", "pitch_down"),
+            roll=self._axis("roll_right", "roll_left"),
+            boost="boost" in self._pressed_actions,
+        )
+
+    def _handle_key(self, key, pressed):
+        action = self._key_actions.get(key)
+        if action is None:
+            return
+        if action == "kill":
+            if pressed and self.controller is not None:
+                self.controller.kill()
+            return
+        if pressed:
+            self._pressed_actions.add(action)
+        else:
+            self._pressed_actions.discard(action)
+        if self.controller is not None:
+            self.controller.set_input("keyboard", self._keyboard_state())
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            self._handle_key(event.key(), True)
+        elif event.type() == QEvent.Type.KeyRelease:
+            self._handle_key(event.key(), False)
+        return super().eventFilter(obj, event)
 
     def _update_camera(self):
         frame = self.camera.read_frame()
@@ -88,6 +161,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._reposition_pad()
         self._update_camera()
 
     def closeEvent(self, event):

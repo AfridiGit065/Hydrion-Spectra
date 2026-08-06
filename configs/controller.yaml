@@ -1,0 +1,30 @@
+controller:
+  enabled: true
+  key_speed: 1.0
+  keymap:
+    forward: W
+    back: S
+    left: A
+    right: D
+    up: R
+    down: F
+    yaw_left: Q
+    yaw_right: E
+    pitch_up: I
+    pitch_down: K
+    roll_left: J
+    roll_right: L
+    boost: Shift
+    kill: Backspace
+  gamepad:
+    axes:
+      surge: LY
+      sway: LX
+      heave: RY
+      yaw: RX
+      pitch: null
+      roll: null
+    buttons:
+      boost: A
+      kill: Back
+    deadzone: 0.1
