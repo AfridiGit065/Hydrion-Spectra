@@ -15,7 +15,8 @@ Build a modular ROV software stack that:
 - Streams live camera video.
 - Later: telemetry, sensors (IMU/depth/compass), thrusters, navigation, failsafe, logging, mission.
 
-Current milestone reached: **GUI window opens with live camera feed + top-right HUD mini-map overlay.**
+Current milestone reached: **GUI window opens with live camera feed + top-right HUD mini-map,
+fed by the sensors module (simulated IMU/depth/compass through the real pipeline).**
 
 ---
 
@@ -34,7 +35,8 @@ rov-controller/
 │   └── event_bus.py
 ├── modules/             # Feature modules (mostly placeholders)
 │   ├── camera/          # camera_manager.py — REAL (captures + reads frames)
-│   ├── controller/  sensors/  telemetry/  navigation/
+│   ├── sensors/         # sensor_manager.py — REAL (IMU/depth/compass via provider, simulated now)
+│   ├── controller/  telemetry/  navigation/
 │   ├── thrusters/  mission/  manipulator/  watchdog/
 │   ├── diagnostics/  logger/  config/      # all empty
 ├── ui/                  # GUI
@@ -42,9 +44,10 @@ rov-controller/
 │   └── hud.py           # HUD overlay — REAL (mini-map + trail + heading)
 ├── configs/             # YAML configs
 │   ├── camera.yaml      # camera settings (device/width/height/fps/enabled)
-│   ├── hud.yaml         # HUD settings (size/colors/trail/sim)
+│   ├── hud.yaml         # HUD settings (size/colors/trail)
+│   ├── sensors.yaml     # sensor settings (provider/sim rates)
 │   ├── network.yaml     # network settings
-│   └── sensors/telemetry/thrusters/navigation/mission.yaml  # empty
+│   └── telemetry/thrusters/navigation/mission.yaml  # empty
 ├── systemd/             # rov-controller.service (empty — not set up yet)
 ├── scripts/             # start.sh / stop.sh / restart.sh (empty)
 ├── tests/               # (empty)
@@ -115,22 +118,26 @@ If no camera is available, status shows "No Camera Signal" (no crash).
   each guarded so one module failing doesn't kill the boot. `get(name)`, `modules()`,
   `health_check() -> {name: bool}` (a `None` result counts as OK).
 - `core/application.py` — `Application`: top-level bootstrap. `initialize()` boots `ConfigManager`
-  + `LoggerManager`, builds modules from config (currently `CameraManager` if `camera.enabled`),
-  and initializes/starts them via the `ServiceManager`. `run()` then creates the `QApplication`,
-  shows `MainWindow`, and shuts everything down on exit (`shutdown()` → `stop_all()`).
+  + `LoggerManager`, builds modules from config (`CameraManager` if `camera.enabled`,
+  `SensorManager` if `sensors.enabled`), and initializes/starts them via the `ServiceManager`.
+  `run()` then creates the `QApplication`, shows `MainWindow`, and shuts everything down on exit
+  (`shutdown()` → `stop_all()`).
+- `modules/sensors/sensor_manager.py` — `SensorManager(BaseModule)`: reads IMU/depth/compass through a
+  swappable provider, exposes `get_state() -> HudState`. Default `SimulatedSensorProvider` (scripted
+  values); unknown `provider` config falls back to simulated so it always runs. The `HudState`
+  dataclass (`x`, `y`, `depth`, `yaw_deg`) lives here too — the sensor module owns the data model,
+  `ui/hud.py` imports it (UI depends on the module, not vice-versa).
 - `app/main.py` — thin entry point: `Application().run()`.
 - `ui/main_window.py` — `MainWindow(QMainWindow)`: layout (left panel + camera view + status bar),
   `QTimer` polling camera at ~30 fps, converts BGR → QImage → QPixmap, calls HUD overlay before display.
 - `ui/hud.py` — HUD overlay (see section 6).
-- `app/main.py` — boots `ConfigManager` + `LoggerManager`, loads configs, creates `QApplication`,
-  `CameraManager`, `HudOverlay`, `SimulatedHudProvider`, shows `MainWindow`.
 
 ### Placeholders (empty files, exist for structure)
 - `core/event_bus.py`
 - `app/app.py`, `app/bootstrap.py`
-- All `modules/*` managers except camera, config, logger
+- All `modules/*` managers except camera, config, logger, sensors
 - `systemd/rov-controller.service`, `scripts/*.sh`
-- Empty configs: `sensors.yaml`, `telemetry.yaml`, `thrusters.yaml`, `navigation.yaml`, `mission.yaml`
+- Empty configs: `telemetry.yaml`, `thrusters.yaml`, `navigation.yaml`, `mission.yaml`
 
 ---
 
@@ -154,18 +161,25 @@ Top-right 2D local plan-view overlay drawn onto the video frame with OpenCV (bef
 
 ### Data flow
 ```
-SimulatedHudProvider.get_state()  ->  HudState(x, y, depth, yaw_deg)
+SensorManager.get_state()          # module -> provider (SimulatedSensorProvider today)
+  ->  HudState(x, y, depth, yaw_deg)
 HudOverlay.render(frame, state)   ->  frame with overlay
 ```
-`HudState` is a dataclass: `x` (East m), `y` (North m), `depth` (m), `yaw_deg` (0 = North, CW+).
+`HudState` is a dataclass (defined in `modules/sensors/sensor_manager.py`): `x` (East m),
+`y` (North m), `depth` (m), `yaw_deg` (0 = North, CW+).
 
-### Wiring real sensor data (future)
-Replace `SimulatedHudProvider` in `app/main.py` with a provider returning `HudState` from real sources:
-- `yaw_deg` ← IMU/compass heading.
-- `depth` ← pressure/depth sensor.
-- `x, y` ← integrate velocity (vx·dt, vy·dt) into local XY from launch, or use a position estimate.
+### Wiring real sensor data
+The sensor pipeline already runs through the real module path: `SensorManager` is registered with the
+`ServiceManager` and feeds the HUD as its provider. It reads whichever provider `sensors.provider`
+names; today that's `simulated`. To attach real hardware later:
+- Add a `RealSensorProvider` (same `get_state()` shape) and register it under the provider name in
+  `SensorManager.initialize()`.
+- Set `configs/sensors.yaml` → `provider: real` (keep the `simulated` fallback so it still runs if
+  the hardware is absent).
+- Real sources map to `HudState`: `yaw_deg` ← IMU/compass heading; `depth` ← pressure/depth sensor;
+  `x, y` ← integrate velocity (vx·dt, vy·dt) into local XY from launch, or use a position estimate.
 
-Nothing in `HudOverlay` or `MainWindow` changes — only the provider.
+Nothing in `HudOverlay` or `MainWindow` changes — only the provider behind the module.
 
 ### Performance
 Background (panel + grid) is pre-rendered once and cached per frame size; only dynamic elements are
@@ -185,9 +199,11 @@ drawn each frame. Measured headless: **~109 FPS** for sim + render (target ≥30
 | `arrow.length` / `arrow.thickness` / `arrow.color` | heading arrow | `28` / `2` / green |
 | `rov.color` / `rov.radius` | ROV marker | white / `4` |
 | `text.*` | label font size/color | see file |
-| `sim.*` | simulated provider params | see file |
 
 All colors in the YAML are **BGR** (OpenCV convention).
+
+Simulated motion/rate parameters (`speed_mps`, `turn_rate_degps`, `depth_rate_mps`, `start_yaw_deg`)
+moved to `configs/sensors.yaml` under `sensors.sim.*`.
 
 ---
 
@@ -220,14 +236,15 @@ Whenever a feature is added, the README must also document:
 ### Quick scan — how to resume work
 
 > **State:** everything below runs on a laptop with simulated/dummy data — no hardware attached yet.
-> Last finished step: **Step 2 (ServiceManager/Application).** Next to do: **Step 3 (Real telemetry).**
+> Last finished step: **Step 3 (Real telemetry — sensor module).** Next to do: **Step 4 (Network / telemetry link).**
 
 | # | Step | What it does (plain) | Status |
 |---|------|----------------------|--------|
 | 0 | GUI + camera + HUD | Window opens, live camera feed, mini-map overlay | ✅ done |
 | 1 | Config + Logger | One place loads all config files; proper logging to file | ✅ done |
 | 2 | ServiceManager / Application | The "conductor" — starts/stops every module in order | ✅ done |
-| 3 | Real telemetry | HUD shows real IMU/depth/compass (simulated for now) | ⏳ **NEXT** |
+| 3 | Real telemetry | HUD shows real IMU/depth/compass (simulated for now) | ✅ done |
+| 4 | Network / telemetry link | Talks to surface station, heartbeat, commands down | ⏳ **NEXT** |
 | 4 | Network / telemetry link | Talks to surface station, heartbeat, commands down | ⬜ pending |
 | 5 | Thrusters / motion | Joystick → navigation → controller → motors (simulated) | ⬜ pending |
 | 6 | systemd auto-start | ROV starts itself on boot, start/stop scripts | ⬜ pending |
@@ -235,6 +252,20 @@ Whenever a feature is added, the README must also document:
 
 ### Change record (most recent first)
 
+- **2026-08-06 — Step 3: Sensors module (real telemetry pipeline, simulated values)**
+  - `modules/sensors/sensor_manager.py` — `SensorManager(BaseModule)` with the standard lifecycle and
+    `get_state() -> HudState`. Provider abstraction: `SimulatedSensorProvider` (moved from the old
+    `SimulatedHudProvider` in `ui/hud.py`); unknown `provider` config falls back to simulated so it
+    always runs. `HudState` now lives here — the sensor module owns the telemetry data model and
+    `ui/hud.py` imports it.
+  - `configs/sensors.yaml` — filled in: `enabled`, `provider`, and the `sim` rate params (moved out of
+    `hud.yaml`, whose `sim` block was removed).
+  - `core/application.py` — registers `SensorManager` (if `sensors.enabled`) and passes it to
+    `MainWindow` as the HUD provider; `SimulatedHudProvider` deleted.
+  - Verified: offscreen smoke test (modules: Camera, Sensors; both health OK; HUD renders from module
+    data) + `python app/main.py` boots into the event loop with no errors.
+  - **Hardware note:** no hardware involved — values are scripted. When a real IMU/pressure sensor is
+    attached, add a `RealSensorProvider` and set `sensors.provider` (see §6).
 - **2026-08-06 — Step 2: ServiceManager + Application implemented**
   - `core/service_manager.py` — the "conductor": `register(module)` any `BaseModule`, then
     `initialize_all` / `start_all` / `update_all` / `stop_all` (reverse order) run the lifecycle.
@@ -268,12 +299,12 @@ Whenever a feature is added, the README must also document:
 ### Next session — start here
 
 1. Read this README (§1 goal, §7 sim-first rule, §8 this table).
-2. **Implement Step 3**: real telemetry pipeline — `modules/sensors/sensor_manager.py` (IMU/depth/compass,
-   simulated provider for now) feeding `HudState` through the new module interface; wire the sensor module
-   into `Application._build_modules()` and use its data as the HUD provider instead of `SimulatedHudProvider`.
-   Also plan `modules/telemetry/telemetry_manager.py`.
+2. **Implement Step 4**: network / telemetry link — `modules/telemetry/telemetry_manager.py`
+   (a `BaseModule` that packs sensor state + camera health into a lightweight frame and talks to the
+   surface station over the link in `configs/network.yaml`: host/port, heartbeat interval, protocol).
+   Simulated link first (loopback/log) with a provider-style swap to real sockets later.
 3. Verify after each step (`python app/main.py`, headless test snippet in §9).
-4. When done, update this table (move Step 3 to ✅), add a change-record line, and commit.
+4. When done, update this table (move Step 4 to ✅), add a change-record line, and commit.
 
 ---
 
@@ -292,10 +323,13 @@ To verify the overlay without a camera/display (headless test):
 .venv/bin/python - <<'EOF'
 import sys, yaml, numpy as np
 sys.path.insert(0, ".")
-from ui.hud import HudOverlay, SimulatedHudProvider
-cfg = yaml.safe_load(open("configs/hud.yaml"))
-p = SimulatedHudProvider(cfg); o = HudOverlay(cfg)
+from ui.hud import HudOverlay
+from modules.sensors.sensor_manager import SensorManager
+hud_cfg = yaml.safe_load(open("configs/hud.yaml"))
+sensor_cfg = yaml.safe_load(open("configs/sensors.yaml"))["sensors"]
+o = HudOverlay(hud_cfg)
+s = SensorManager(sensor_cfg); s.initialize()
 f = np.full((720, 1280, 3), (90, 90, 130), dtype=np.uint8)
-import cv2; cv2.imwrite("/tmp/hud.png", o.render(f, p.get_state()))
+import cv2; cv2.imwrite("/tmp/hud.png", o.render(f, s.get_state()))
 EOF
 ```

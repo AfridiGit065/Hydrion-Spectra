@@ -6,7 +6,8 @@ from core.service_manager import ServiceManager
 from modules.camera.camera_manager import CameraManager
 from modules.config.config_manager import ConfigManager
 from modules.logger.logger_manager import LoggerManager
-from ui.hud import HudOverlay, SimulatedHudProvider
+from modules.sensors.sensor_manager import SensorManager
+from ui.hud import HudOverlay
 from ui.main_window import MainWindow
 
 
@@ -34,14 +35,19 @@ class Application:
         camera_config = self.config_manager.get_section("camera")
         if self.config_manager.get("camera", "enabled", True):
             self.service_manager.register(CameraManager(camera_config))
+        if self.config_manager.get("sensors", "enabled", True):
+            self.service_manager.register(
+                SensorManager(self.config_manager.get_section("sensors"))
+            )
 
     def create_window(self):
         hud_config = {"hud": self.config_manager.get_section("hud")}
         camera = self.service_manager.get("Camera")
+        sensors = self.service_manager.get("Sensors")
         return MainWindow(
             camera,
             overlay=HudOverlay(hud_config),
-            hud_provider=SimulatedHudProvider(hud_config),
+            hud_provider=sensors,
         )
 
     def run(self):
