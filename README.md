@@ -365,6 +365,19 @@ Whenever a feature is added, the README must also document:
 
 ### Change record (most recent first)
 
+- **2026-08-06 — Fix: nav-rail hover expand (layout starvation)**
+  - Symptom: keeping the cursor on the left sidebar did not expand it, so the icon labels stayed
+    clipped (only glyphs visible).
+  - Root cause: the dashboard's `camera_view` QLabel reported `sizeHint`/`minimumSizeHint` of
+    1384×744 (the full camera pixmap it displays), forcing the stacked workspace to refuse
+    shrinking below 1384 px. With a 1440 px window the rail was pinned to its 56 px minimum, so
+    it could never visually expand even though the hover logic fired and set the logical state.
+  - Fix (`ui/main_window.py`): `camera_view` now uses `QSizePolicy.Ignored` + `setMinimumSize(1, 1)`
+    — the pixmap is already center-cropped to fill in `_update_camera`, so the label imposes no
+    minimum on the layout. The rail now expands to 208 px on hover, holds while the cursor stays,
+    and collapses on leave.
+  - Verified on a real display (`QT_QPA_PLATFORM=xcb`, `QCursor.setPos`): rail 56 → 208 on enter,
+    stable while hovered, back to 56 on leave.
 - **2026-08-06 — UI: Hydrion Spectra GCS redesign (matches `stitch_hydrion_spectra_gcs/` design)**
   - The whole GUI is now a "Dark Ocean" glassmorphism control station derived from the Stitch
     screens (see `stitch_hydrion_spectra_gcs/hydrion_spectra_gcs/DESIGN.md` for the design system).
