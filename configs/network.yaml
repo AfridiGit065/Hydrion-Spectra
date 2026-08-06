@@ -1,3 +1,7 @@
 network:
+  enabled: true
+  link: simulated
   ip: 192.168.1.2
   port: 5000
+  telemetry_interval_s: 0.5
+  heartbeat_interval_s: 1.0

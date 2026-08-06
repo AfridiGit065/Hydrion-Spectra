@@ -1,5 +1,6 @@
 import sys
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from core.service_manager import ServiceManager
@@ -7,6 +8,7 @@ from modules.camera.camera_manager import CameraManager
 from modules.config.config_manager import ConfigManager
 from modules.logger.logger_manager import LoggerManager
 from modules.sensors.sensor_manager import SensorManager
+from modules.telemetry.telemetry_manager import TelemetryManager
 from ui.hud import HudOverlay
 from ui.main_window import MainWindow
 
@@ -21,6 +23,7 @@ class Application:
         self.service_manager = ServiceManager()
         self.qt_app = None
         self.main_window = None
+        self.update_timer = None
         self.log = None
 
     def initialize(self):
@@ -39,6 +42,14 @@ class Application:
             self.service_manager.register(
                 SensorManager(self.config_manager.get_section("sensors"))
             )
+        if self.config_manager.get("network", "enabled", True):
+            self.service_manager.register(
+                TelemetryManager(
+                    self.config_manager.get_section("network"),
+                    sensors=self.service_manager.get("Sensors"),
+                    camera=self.service_manager.get("Camera"),
+                )
+            )
 
     def create_window(self):
         hud_config = {"hud": self.config_manager.get_section("hud")}
@@ -53,6 +64,9 @@ class Application:
     def run(self):
         self.initialize()
         self.qt_app = QApplication(self.argv)
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.service_manager.update_all)
+        self.update_timer.start(100)
         self.main_window = self.create_window()
         self.main_window.show()
         self.log.info("Main window shown, entering event loop")
@@ -63,6 +77,8 @@ class Application:
         return exit_code
 
     def shutdown(self):
+        if self.update_timer is not None:
+            self.update_timer.stop()
         self.service_manager.stop_all()
         if self.log is not None:
             self.log.info("Application shutdown complete")
