@@ -29,8 +29,8 @@ rov-controller/
 │   └── bootstrap.py     # (empty placeholder)
 ├── core/                # Shared framework
 │   ├── base_module.py   # BaseModule class (implemented)
-│   ├── application.py   # (empty placeholder)
-│   ├── service_manager.py
+│   ├── application.py   # Application (boots Config+Logger+ServiceManager+Qt)
+│   ├── service_manager.py  # ServiceManager (module lifecycle conductor)
 │   └── event_bus.py
 ├── modules/             # Feature modules (mostly placeholders)
 │   ├── camera/          # camera_manager.py — REAL (captures + reads frames)
@@ -41,7 +41,7 @@ rov-controller/
 │   ├── main_window.py   # MainWindow — REAL (camera view + status bar + HUD hook)
 │   └── hud.py           # HUD overlay — REAL (mini-map + trail + heading)
 ├── configs/             # YAML configs
-│   ├── camera.yaml      # camera settings (device/width/height/fps)
+│   ├── camera.yaml      # camera settings (device/width/height/fps/enabled)
 │   ├── hud.yaml         # HUD settings (size/colors/trail/sim)
 │   ├── network.yaml     # network settings
 │   └── sensors/telemetry/thrusters/navigation/mission.yaml  # empty
@@ -110,6 +110,15 @@ If no camera is available, status shows "No Camera Signal" (no crash).
   to `logs/system.log` and `logs/errors.log` (ERROR+ only), `get_logger(name)`.
 - `modules/camera/camera_manager.py` — `CameraManager(BaseModule)`: opens `cv2.VideoCapture(device)`,
   applies width/height/fps from config, `read_frame() -> BGR ndarray | None`, `stop()` releases.
+- `core/service_manager.py` — `ServiceManager`: the "conductor". `register(module)` (any `BaseModule`),
+  then `initialize_all/start_all/update_all/stop_all` run the lifecycle in order (stop is reversed),
+  each guarded so one module failing doesn't kill the boot. `get(name)`, `modules()`,
+  `health_check() -> {name: bool}` (a `None` result counts as OK).
+- `core/application.py` — `Application`: top-level bootstrap. `initialize()` boots `ConfigManager`
+  + `LoggerManager`, builds modules from config (currently `CameraManager` if `camera.enabled`),
+  and initializes/starts them via the `ServiceManager`. `run()` then creates the `QApplication`,
+  shows `MainWindow`, and shuts everything down on exit (`shutdown()` → `stop_all()`).
+- `app/main.py` — thin entry point: `Application().run()`.
 - `ui/main_window.py` — `MainWindow(QMainWindow)`: layout (left panel + camera view + status bar),
   `QTimer` polling camera at ~30 fps, converts BGR → QImage → QPixmap, calls HUD overlay before display.
 - `ui/hud.py` — HUD overlay (see section 6).
@@ -117,7 +126,7 @@ If no camera is available, status shows "No Camera Signal" (no crash).
   `CameraManager`, `HudOverlay`, `SimulatedHudProvider`, shows `MainWindow`.
 
 ### Placeholders (empty files, exist for structure)
-- `core/application.py`, `core/service_manager.py`, `core/event_bus.py`
+- `core/event_bus.py`
 - `app/app.py`, `app/bootstrap.py`
 - All `modules/*` managers except camera, config, logger
 - `systemd/rov-controller.service`, `scripts/*.sh`
@@ -211,14 +220,14 @@ Whenever a feature is added, the README must also document:
 ### Quick scan — how to resume work
 
 > **State:** everything below runs on a laptop with simulated/dummy data — no hardware attached yet.
-> Last finished step: **Step 1 (Config + Logger).** Next to do: **Step 2 (ServiceManager/Application).**
+> Last finished step: **Step 2 (ServiceManager/Application).** Next to do: **Step 3 (Real telemetry).**
 
 | # | Step | What it does (plain) | Status |
 |---|------|----------------------|--------|
 | 0 | GUI + camera + HUD | Window opens, live camera feed, mini-map overlay | ✅ done |
 | 1 | Config + Logger | One place loads all config files; proper logging to file | ✅ done |
-| 2 | ServiceManager / Application | The "conductor" — starts/stops every module in order | ⏳ **NEXT** |
-| 3 | Real telemetry | HUD shows real IMU/depth/compass (simulated for now) | ⬜ pending |
+| 2 | ServiceManager / Application | The "conductor" — starts/stops every module in order | ✅ done |
+| 3 | Real telemetry | HUD shows real IMU/depth/compass (simulated for now) | ⏳ **NEXT** |
 | 4 | Network / telemetry link | Talks to surface station, heartbeat, commands down | ⬜ pending |
 | 5 | Thrusters / motion | Joystick → navigation → controller → motors (simulated) | ⬜ pending |
 | 6 | systemd auto-start | ROV starts itself on boot, start/stop scripts | ⬜ pending |
@@ -226,6 +235,21 @@ Whenever a feature is added, the README must also document:
 
 ### Change record (most recent first)
 
+- **2026-08-06 — Step 2: ServiceManager + Application implemented**
+  - `core/service_manager.py` — the "conductor": `register(module)` any `BaseModule`, then
+    `initialize_all` / `start_all` / `update_all` / `stop_all` (reverse order) run the lifecycle.
+    Each step is try/except-guarded so one bad module can't kill the boot. `get(name)`, `modules()`,
+    `health_check() -> {name: bool}` (a `None` health result counts as OK).
+  - `core/application.py` — `Application` boots Config + Logger, builds modules from config
+    (`CameraManager` only if `camera.enabled`), starts them, then creates the `QApplication`,
+    `MainWindow` (HUD overlay + simulated provider), and on exit runs `stop_all`.
+  - `app/main.py` — reduced to a thin `Application().run()` entry point.
+  - `configs/camera.yaml` — added `enabled: true` (per-module on/off switch from config).
+  - Also fixed: HUD provider/overlay now receive `{"hud": ...}` so non-default `hud.yaml` values
+    are actually respected (previously defaults were used silently).
+  - Verified: offscreen smoke test (modules: Camera; health OK; clean stop) + `python app/main.py`
+    boots into the event loop with no errors.
+  - **Hardware note:** no hardware involved in this step (pure software).
 - **2026-08-05 — Step 1: Config + Logger implemented**
   - `modules/config/config_manager.py` — loads every `configs/*.yaml` at once; `get(section, key, default)`,
     `get_section(name)`, `sections()`. Handles the double-wrapped YAML keys (e.g. `camera.yaml` is `camera: {...}`).
@@ -244,10 +268,12 @@ Whenever a feature is added, the README must also document:
 ### Next session — start here
 
 1. Read this README (§1 goal, §7 sim-first rule, §8 this table).
-2. **Implement Step 2**: `core/service_manager.py` (create/start/update/stop/health-check all modules from
-   config) and `core/application.py` (boots Config+Logger+ServiceManager+Qt). Wire into `app/main.py`.
+2. **Implement Step 3**: real telemetry pipeline — `modules/sensors/sensor_manager.py` (IMU/depth/compass,
+   simulated provider for now) feeding `HudState` through the new module interface; wire the sensor module
+   into `Application._build_modules()` and use its data as the HUD provider instead of `SimulatedHudProvider`.
+   Also plan `modules/telemetry/telemetry_manager.py`.
 3. Verify after each step (`python app/main.py`, headless test snippet in §9).
-4. When done, update this table (move Step 2 to ✅), add a change-record line, and commit.
+4. When done, update this table (move Step 3 to ✅), add a change-record line, and commit.
 
 ---
 
