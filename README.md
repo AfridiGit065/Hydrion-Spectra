@@ -19,7 +19,12 @@ Current milestone reached: **A Hydrion Spectra GCS-style control station — a "
 glassmorphism shell (top app bar, collapsible left nav rail, bottom system footer) around a
 camera-first dashboard with live telemetry, plus working module pages (Sensors, Diagnostics,
 Logs, Settings, Operations) and placeholders for future sections (Navigation, Manipulator,
-Planner, AI Vision).**
+Planner, AI Vision). On top of that, **Phase 1 hardware model is done**: the thruster stack now
+represents the real 5-thruster ROV (M1–M5) with surge/yaw/heave mixing, per-motor GPIO +
+direction config. **Phase 2 Part A is done**: `Esp32ThrusterProvider` + a UART transport push the
+mixed M1..M5 setpoints to an ESP32 ESC controller over serial, with ACK/STATUS/HEARTBEAT parsing,
+ESTOP and reconnect. Default stays `provider: simulated` — still fully functional with no hardware
+attached. Part B (ESP32 firmware) is the next work item.**
 
 ---
 
@@ -41,7 +46,8 @@ rov-controller/
 │   ├── sensors/         # sensor_manager.py — REAL (state + apply_motion, simulated provider)
 │   ├── telemetry/       # telemetry_manager.py — REAL (JSON frames + heartbeat over a Link)
 │   ├── controller/      # controller.py — REAL (MotionState merge: pad/keyboard/link/gamepad)
-│   ├── thrusters/       # thruster_manager.py — REAL (mixing matrix + simulated provider)
+│   ├── thrusters/       # thruster_manager.py — REAL (5-thruster mixer + simulated provider)
+│   │                    #   Esp32ThrusterProvider (Phase 2 Part A) + uart_transport.py (UART frames)
 │   ├── navigation/  mission/  manipulator/  watchdog/  diagnostics/   # empty
 ├── ui/                  # GUI (Hydrion Spectra GCS "Dark Ocean" style)
 │   ├── main_window.py   # MainWindow — REAL (app bar + nav rail + footer + workspaces)
@@ -58,37 +64,53 @@ rov-controller/
 │   ├── sensors.yaml     # sensor settings (provider/start heading)
 │   ├── network.yaml     # link settings (enabled/link/ip/port/intervals)
 │   ├── controller.yaml  # keymap + gamepad codemap
-│   ├── thrusters.yaml   # thruster provider/speed/layout
-│   └── navigation/mission.yaml  # empty
-├── systemd/             # rov-controller.service (empty — not set up yet)
-├── scripts/             # start.sh / stop.sh / restart.sh (empty)
-├── tests/               # (empty)
-├── logs/                # system.log / errors.log / mission.log
+│   ├── thrusters.yaml   # provider/speed + 5-motor map (GPIO=ESP32 pin, direction ±1)
+│   ├── navigation.yaml  # (empty)
+│   └── mission.yaml     # (empty)
+├── systemd/             # rov-controller.service — TEMPLATE rendered by scripts/start.sh (Step 6 ✅)
+├── scripts/             # start.sh / stop.sh / restart.sh — install+manage the systemd service (Step 6 ✅)
+├── tests/               # test_thruster_mixer.py + test_uart_transport.py (run these!)
+├── logs/                # system.log / errors.log / mission.log (runtime — gitignored)
 └── .venv/               # Python 3.13 virtualenv with deps installed
 ```
+
+> **Where this copy lives:** the active dev copy seen by these sessions is
+> `/home/riazafridi/Downloads/Hydrion-Spectra-main` — and (since Step 6) this **is the Raspberry Pi
+> 5 deployment host**, running directly from this path with its `.venv` present. The original
+> deployment path (`/home/theexplorer/¬/rov-controller`) is an older copy. See §3 for setup/venv.
 
 ---
 
 ## 3. Setup & Dependencies
 
-Virtualenv: `.venv` (Python 3.13). Installed packages:
+> This project currently runs on a **Raspberry Pi 5** (aarch64, Debian 13 trixie, systemd 257) at
+> `/home/riazafridi/Downloads/Hydrion-Spectra-main`. The `.venv` is present here (recreated
+> 2026-09-13 during Step 6). The original deployment path `/home/theexplorer/¬/rov-controller`
+> (`¬` is intentional) is an older copy.
+
+Virtualenv: `.venv` (Python 3.13). Installed packages (actual versions in this copy):
 
 | Package        | Version |
 |----------------|---------|
 | opencv-python  | 5.0.0.93 |
-| PySide6        | 6.11.1 |
+| PySide6        | 6.11.2 |
 | pillow         | 12.3.0 |
 | PyYAML         | 6.0.3 |
-| numpy          | 2.5.1 |
+| numpy          | 2.5.3 |
+| pyserial       | 3.5   (ESP32 UART link — Phase 2. Optional: app runs without it) |
 
-To re-activate the environment:
+Activate / re-create:
 
 ```bash
-cd "/home/theexplorer/¬/rov-controller"
+cd /home/riazafridi/Downloads/Hydrion-Spectra-main        # <project root>
+python3 -m venv .venv                                     # only if .venv is missing
 source .venv/bin/activate
+pip install opencv-python PySide6 pillow PyYAML numpy pyserial     # only if freshly created
 ```
 
-> Note: project lives in `/home/theexplorer/¬/rov-controller` (the `¬` in the path is intentional).
+> The GUI needs a graphical session. On this Pi that is `DISPLAY=:0` via XWayland; the systemd
+> service (§6 step 6 / systemd section below) sets `DISPLAY`, `XAUTHORITY` and
+> `QT_QPA_PLATFORM=xcb` for the Qt app automatically.
 
 ---
 
@@ -99,9 +121,14 @@ source .venv/bin/activate
 python app/main.py
 ```
 
+> To run it automatically after boot instead of by hand (on the Pi), use the systemd service —
+> see §8 (`bash scripts/start.sh` once, then it auto-starts).
+
 Expected behavior:
 
-1. Console prints `[Camera] Camera opened (device 0)`.
+1. Console prints `[Camera] Camera opened (device 0)` — or `Failed to open camera device` (this Pi's
+   USB camera enumerates as `/dev/video19+`, so `configs/camera.yaml` `device: 0` does not match it;
+   point it at the real node to get a live feed).
 2. A window **"HYDRION SPECTRA - ROV Controller"** opens (dark navy "Dark Ocean" theme):
    - **Top app bar:** brand, WORKSPACE tab, status pills (BATT / LINK / UP time / MANUAL), avatar.
    - **Left nav rail** (expands on hover): Dashboard, Operations, Navigation, Sensors,
@@ -113,12 +140,14 @@ Expected behavior:
    - **Bottom footer:** FPS / CPU / RAM / STORAGE / DEPTH / LATENCY.
    - The module pages (Sensors, Diagnostics, Logs, Settings, Operations) show real data from the
      modules; Navigation/Manipulator/Planner/AI Vision are placeholders.
-3. Drive the simulated ROV (see §5 "Manual control" for the full table):
-   - **Pad:** drag the circular stick (surge/sway) — springs back on release; the dashed ring
-     spins while turning.
-   - **Keyboard:** `W/S/A/D/R/F` forward/back/strafe/up/down, `Q/E` turn, `I/K` pitch, `J/L` roll,
-     `Shift` boost, `Backspace` kill. Keys are ignored while typing in a text field.
-   - **Link:** from the surface console, `inject_command("FORWARD 0.5")` → the controller consumes it.
+3. Drive the simulated ROV (see §5 "Manual control" / "5-thruster model" for the full table):
+   - **Pad:** drag the circular stick — vertical = surge (forward/back), horizontal = yaw (turn) —
+     springs back on release; the dashed ring spins while turning.
+   - **Keyboard:** `W/S` forward/back, `A/D` + `Q/E` turn (yaw), `R/F` up/down (heave — the only way
+     to change depth), `I/K` pitch, `J/L` roll (kept for future, no motor), `Shift` boost,
+     `Backspace` kill. Keys are ignored while typing in a text field.
+   - **Link:** from the surface console, `inject_command("FORWARD 0.5")` → the controller consumes it
+     (`LEFT`/`RIGHT` now turn the ROV, since there is no sway thruster).
 4. Telemetry + heartbeat frames are appended to `logs/mission.log` (JSON, one per line).
 5. `SNAP` saves a frame to `logs/snapshots/`; `LIGHTS` brightens the feed; `ARMED` toggles whether
    any input moves the ROV.
@@ -166,13 +195,20 @@ If no camera is available, status shows "No Camera Signal" (no crash).
   (surge/sway/heave/yaw/pitch/roll/boost). Merges input sources (pad, keyboard, link commands) into
   one motion target — per axis the strongest source wins — and pushes it to the thrusters. Handles
   text link commands (`FORWARD 0.5`, `LEFT`, `UP`, `STOP`, …) and a `kill()` emergency stop.
-- `modules/thrusters/thruster_manager.py` — `ThrusterManager(BaseModule)`: splits a `MotionState`
-  into per-thruster setpoints (X4-vectored horizontal + 2 vertical, `MIXING_MATRIX` in code) and
-  applies them via a provider. `SimulatedThrusterProvider` converts setpoints into motion and feeds
-  `SensorManager.apply_motion()`, so the HUD trail + telemetry respond to commands. Unknown
-  `provider` config falls back to simulated.
-- `ui/control_pad.py` — `ControlPad3D`: circular glass motion controller (stick = surge/sway with
-  spring-return, animated dashed yaw ring updated from the keyboard yaw command); emits
+  `LEFT`/`RIGHT` map to **yaw** (there is no sway thruster).
+- `modules/thrusters/thruster_manager.py` — `ThrusterManager(BaseModule)`: 5-thruster model
+  (`ThrusterId` enum: M1 front vertical, M2 middle-right horizontal, M3 middle-left horizontal,
+  M4 back-right vertical, M5 back-left vertical). Pure `mix()` consumes only surge/yaw/heave
+  (M1/M4/M5 = heave, M2 = surge+yaw, M3 = surge−yaw), clamps every motor to [-1,1], and applies
+  configurable per-motor `direction` (+1/−1). `ThrusterProvider` ABC → `SimulatedThrusterProvider`
+  (active, feeds `SensorManager.apply_motion()`) + `Esp32ThrusterProvider` (Phase 2 Part A, sends
+  the mixed setpoints over UART via `modules/thrusters/uart_transport.py`). Per-motor
+  GPIO (ESP32 pins) + direction live in `configs/thrusters.yaml` `motors`. `emergency_stop()` zeros
+  all five motors independently of the controller, and latches a zeroed ESTOP frame to the ESP32.
+  Unknown `provider` config falls back to simulated; `esp32` without hardware stays disconnected.
+- `ui/control_pad.py` — `ControlPad3D`: circular glass motion controller (stick = surge/yaw with
+  spring-return — no sway on the 5-thruster ROV, animated dashed yaw ring updated from stick drag
+  and the keyboard yaw command); emits
   `MotionState` on drag.
 - `ui/theme.py` — design tokens (colors, fonts) from the Stitch `DESIGN.md` + the global
   "Dark Ocean" stylesheet applied via `apply_theme(qt_app)`.
@@ -199,24 +235,55 @@ If no camera is available, status shows "No Camera Signal" (no crash).
 
 | Input | What it drives | Status |
 |-------|---------------|--------|
-| `ControlPad3D` (mouse) | surge / sway (+ yaw ring indicator) | ✅ live |
-| Keyboard (`configs/controller.yaml` `keymap`) | all 6 axes + boost + kill | ✅ live |
+| `ControlPad3D` (mouse) | surge / yaw (+ yaw ring indicator) | ✅ live |
+| Keyboard (`configs/controller.yaml` `keymap`) | surge / yaw / heave + boost + kill (pitch/roll keys kept for future) | ✅ live |
 | Gamepad (codemap in `controller.yaml` `gamepad`) | mapped axes/buttons | ⏳ future provider |
 | Link commands (`FORWARD`, `LEFT`, …) | same motion target | ✅ live |
 
-Heave (up/down) is on the keyboard (**R/F**); the circular pad drives surge/sway.
+Heave (up/down) is on the keyboard (**R/F**); the circular pad drives surge/yaw.
 
-Default keys: **W/S** forward/back, **A/D** strafe, **R/F** up/down, **Q/E** turn, **I/K** pitch,
+**5-thruster ROV (Phase 1):** only surge, yaw and heave are supported. There is no sway thruster —
+left/right input (**A/D**, pad stick-x, link `LEFT`/`RIGHT`) turns the vehicle (yaw). Pitch/roll
+input is kept in the controller for future stabilization but produces **no** motor command.
+
+Default keys: **W/S** forward/back, **A/D** turn, **R/F** up/down, **Q/E** turn, **I/K** pitch,
 **J/L** roll, **Shift** boost, **Backspace** kill (toggle). All reassignable in
 `configs/controller.yaml`.
+
+### 5-thruster motion model (Phase 1) — canonical reference
+
+The ROV has **five** thrusters (wiring fixed, ESP32 GPIO already connected — do not change):
+
+| ID | Role | ESP32 GPIO | Mixer equation | Direction |
+|----|------|:----------:|----------------|:---------:|
+| `M1_FRONT_VERTICAL` | Front vertical | 25 | `heave` | configurable ±1 |
+| `M2_MIDDLE_RIGHT_HORIZONTAL` | Middle right | 33 | `surge + yaw` | configurable ±1 |
+| `M3_MIDDLE_LEFT_HORIZONTAL` | Middle left | 32 | `surge − yaw` | configurable ±1 |
+| `M4_BACK_RIGHT_VERTICAL` | Back right vertical | 27 | `heave` | configurable ±1 |
+| `M5_BACK_LEFT_VERTICAL` | Back left vertical | 26 | `heave` | configurable ±1 |
+
+- Supported axes: **surge, yaw, heave**. **No sway** (no lateral thruster). Pitch/roll are **not**
+  mixed in Phase 1 (kept in `MotionState` + keyboard for future stabilization, produce zero motor).
+- `mix()` in `modules/thrusters/thruster_manager.py` is a **pure function**:
+  every motor output = `clamp(equation × direction, -1, 1)`, values in `[-1.0, 1.0]`, direction from
+  `configs/thrusters.yaml` → `motors` (`+1` default; flip per-motor only after verifying the real
+  mount — never guess in code).
+- Example (all directions `+1`): `surge=1` → M2=+1, M3=+1; `yaw=1` → M2=+1, M3=−1; `heave=1` →
+  M1/M4/M5=+1; `STOP`/e-stop → all five = 0.
+- Provider swap: `ControllerModule` and UI only talk to `ThrusterManager`; the active provider is
+  `thrusters.provider` (`simulated` today — default). `Esp32ThrusterProvider` (Phase 2 Part A) sits
+  behind the same `ThrusterProvider` ABC and sends the mixed setpoints over the UART link (§7).
+  `ThrusterManager.emergency_stop()` zeros all five independently and latches ESTOP to the ESP32.
 
 ### Placeholders (empty files, exist for structure)
 - `core/event_bus.py`
 - `app/app.py`, `app/bootstrap.py`
 - `modules/navigation/`, `modules/watchdog/`, `modules/mission/`, `modules/manipulator/`,
   `modules/diagnostics/`
-- `systemd/rov-controller.service`, `scripts/*.sh`
 - Empty configs: `navigation.yaml`, `mission.yaml`
+
+> The `systemd/` + `scripts/` placeholders are now **real** (Step 6) — see §8 (auto-start) and the
+> tables in §9.
 
 ---
 
@@ -319,18 +386,57 @@ Whenever a feature is added, the README must also document:
 
 ### Hardware attachment notes (current status: nothing attached — these are the future swap points)
 
-**Thrusters / motors**
-- Wiring (when built): each ESC signal line → a PWM-capable GPIO pin on the Pi (e.g. 6 thrusters =
-  GPIO 12/13/18/19 + 2 more, hardware PWM), ESC power from the battery rail, common ground with the
-  Pi. Thruster layout/config: `configs/thrusters.yaml` (`provider`, `speed_mps`, `turn_rate_degps`,
-  `layout`).
-- To get real values: set `thrusters.provider: pwm` and add a `PwmThrusterProvider` (same
-  `setpoints()` + `apply()` shape as `SimulatedThrusterProvider`) that writes PWM duty cycles from
-  the per-thruster setpoints. Fallback: anything except `pwm` (or an unknown name) → simulated, so
-  the app still runs with no motors attached.
-- Calibration: ESCs need throttle range calibration on first power-up (see ESC manual); direction
-  of each thruster must be verified and the sign flipped in `MIXING_MATRIX` (in code) or the layout
-  config if any motor is mounted reversed.
+**Thrusters / motors (5-thruster ROV — Phase 1 + Phase 2 Part A)**
+- Final chain: MacBook → Ethernet tether → Raspberry Pi → Hydrion-Spectra → ESP32 → 5 × ESC → 5 ×
+  thrusters. The Pi is the high-level computer (**does not** generate PWM); the ESP32 is the
+  low-level real-time ESC controller. **Part A (Pi side) is implemented**: `Esp32ThrusterProvider` +
+  `uart_transport.py` push the mixed setpoints over serial. **Part B (ESP32 firmware) is the next
+  step** — the firmware must speak the same protocol (§7 → "ESP32 UART protocol").
+- Wiring (when built): Raspberry Pi USB-UART adapter (TX↔ESP32 RX, RX↔ESP32 TX, common GND) →
+  ESP32 → each ESC signal line → an ESP32 PWM-capable GPIO (wiring is already physical and must not
+  change): M1 front vertical → GPIO 25, M2 middle right → GPIO 33, M3 middle left → GPIO 32, M4 back
+  right → GPIO 27, M5 back left → GPIO 26. ESC power from the battery rail, common ground with the
+  Pi/ESP32.
+- Motor IDs / GPIO / direction metadata live in `configs/thrusters.yaml` → `motors`
+  (`M1_FRONT_VERTICAL`, `M2_MIDDLE_RIGHT_HORIZONTAL`, `M3_MIDDLE_LEFT_HORIZONTAL`,
+  `M4_BACK_RIGHT_VERTICAL`, `M5_BACK_LEFT_VERTICAL`), each with `gpio` (ESP32 pin — metadata) and
+  `direction` (+1/−1).
+- To get real values: set `thrusters.provider: esp32` and point `thrusters.esp32.serial_port` at the
+  UART adapter (prefer `/dev/serial/by-id/...`). Nothing else changes — `Esp32ThrusterProvider`
+  exposes the same `setpoints()` + `apply()` shape as `SimulatedThrusterProvider`, so switching the
+  provider never touches the controller, GUI or telemetry.
+- **Fallback (default): `provider: simulated`** — the app runs fully with no ESP32 connected.
+  Even with `provider: esp32` and no hardware, the app keeps running: the provider stays
+  disconnected, reports `status()` (connected/link_alive/dropped-frames/crc/ack stats) and retries
+  reconnects — it never crashes.
+- Calibration: ESCs need throttle range calibration on first power-up (see ESC manual). Verify the
+  direction of each motor and flip its `direction` in `configs/thrusters.yaml` if mounted reversed —
+  never guess the sign in code.
+
+### ESP32 UART protocol (Phase 2 — reference for the ESP32 firmware)
+
+One binary, length-prefixed, CRC-checked frame each direction over the UART. Layout (little-endian):
+
+```
+BYTE    FIELD        NOTES
+0-1     HEADER       0xAA 0x55 (sync)
+2       VERSION      0x01
+3       TYPE         0x01 MOTOR_COMMAND (Pi->ESP32) | 0x02 ACK | 0x03 NACK |
+                     0x04 STATUS | 0x05 HEARTBEAT (ESP32->Pi)
+4       LENGTH       payload bytes (MOTOR_COMMAND payload = 10)
+5       SEQUENCE     rolling counter & 0xFF (ACK echoes the command's sequence)
+6       FLAGS        bit0 ESTOP (must halt all ESCs); bit1 HEARTBEAT_REQ
+7..     PAYLOAD      M1..M5 as int16 * MOTOR_SCALE (MOTOR_SCALE = 1000):
+                     normalized -1.0..+1.0 <-> -1000..+1000, little-endian
+last-2  CRC16        CRC-16/CCITT-FALSE over bytes 2..end-of-payload
+```
+
+- The Pi **always** sends already-mixed, clamped M1..M5 — never surge/yaw/heave.
+- ESTOP (FLAGS bit0): the Pi re-issues a zeroed ESTOP frame while e-stop is latched so the ESP32 is
+  expected to halt immediately and hold. Design the firmware-side command watchdog: if no fresh
+  MOTOR_COMMAND arrives (e.g. 250 ms), the ESP32 should also stop on its own.
+- Reference implementation (Python): `modules/thrusters/uart_transport.py` (`build_motor_command`,
+  `parse_frame`, `crc16_ccitt`); tests in `tests/test_uart_transport.py`.
 
 **Gamepad / joystick (future)**
 - Wiring: USB gamepad (e.g. Xbox/PS style) plugged into the Pi — no GPIO.
@@ -345,12 +451,79 @@ Whenever a feature is added, the README must also document:
 
 ---
 
-## 8. Progress Log & Where We Left Off
+## 8. Raspberry Pi Auto-Start (systemd) — Step 6 ✅
+
+The ROV controller auto-starts when the Pi boots into its graphical desktop and restarts if it
+crashes.
+
+- **Service name:** `rov-controller.service`
+- **Deployment path (this Pi):** `/home/riazafridi/Downloads/Hydrion-Spectra-main`
+- **Unit:** `systemd/rov-controller.service` is a **template** — `scripts/start.sh` renders it into
+  `/etc/systemd/system/rov-controller.service` using the paths/user/python it **discovers** (project
+  root from the script location, service user = project owner, python = `.venv/bin/python`). Nothing
+  is hardcoded/guessed.
+- **GUI environment:** `scripts/start.sh` also writes `/etc/rov-controller.env` with live-display
+  values (DISPLAY / XAUTHORITY / QT_QPA_PLATFORM=xcb) so Qt can open the window. On this Pi that is
+  `DISPLAY=:0` via XWayland, `XAUTHORITY=/home/riazafridi/.Xauthority`.
+- **Behaviour:** starts after `graphical.target`; `Restart=on-failure`, `RestartSec=5` → crashes
+  auto-restart, clean exit / `systemctl stop` does **not** restart (no loop); systemd guarantees a
+  single instance; runs as the project owner (never root).
+
+### Commands
+
+| Action | Command |
+|--------|---------|
+| **Install + start** (renders unit, writes env, enables + starts) | `bash scripts/start.sh` |
+| Start (if already installed) | `sudo systemctl start rov-controller.service` |
+| Enable at boot | `sudo systemctl enable rov-controller.service` |
+| Disable at boot (stop autostart) | `sudo systemctl disable rov-controller.service` |
+| Stop (clean, no auto-restart) | `sudo systemctl stop rov-controller.service` |
+| Restart | `sudo systemctl restart rov-controller.service` |
+| Status / verify | `systemctl status rov-controller.service` |
+| Live logs | `journalctl -u rov-controller.service -f` |
+| Last 100 log lines | `journalctl -u rov-controller.service -n 100 --no-pager` |
+
+> `scripts/start.sh` / `stop.sh` / `restart.sh` are wrapper helpers that self-promote to root via
+> `sudo` and handle install/render/report; they are the recommended entry point
+> (`bash scripts/start.sh`, `bash scripts/stop.sh`, `bash scripts/restart.sh`).
+
+### How to verify auto-start after reboot
+
+```bash
+sudo reboot            # on the Pi
+# after the desktop comes up, wait ~15s, then:
+systemctl status rov-controller.service   # should show "active (running)"
+systemctl is-enabled rov-controller.service && echo enabled
+pgrep -af "[a]pp/main.py"                 # exactly one python app/main.py
+journalctl -u rov-controller.service --no-pager -n 100 | grep "Main window shown"
+```
+
+The service is considered running only when the last command prints
+`Main window shown, entering event loop` (after the GUI connected to the display).
+
+### Step 6 verification performed (2026-09-13, on this Pi)
+
+- `systemd-analyze verify` on the rendered unit — exit 0 (no syntax errors).
+- Full runtime lifecycle was exercised with an **identical user-instance** unit (the system-level
+  install needs your sudo password): start → **active**, GUI launched
+  (`Main window shown, entering event loop`); **crash** (SIGKILL) → auto-restarted with a new PID;
+  **stop** → inactive, no restart loop; **restart** → active again; **idempotent re-start** → still
+  exactly one instance; app logs captured.
+- Existing tests: `python -m unittest tests.test_thruster_mixer -v` → 26/26 OK.
+- Manual launch: `.venv/bin/python app/main.py` → runs, GUI shown.
+- ⚠️ The **boot-time systemd step itself** (`sudo bash scripts/start.sh`) still needs to be run once
+  by you (it requires root); the scripts + unit are verified and ready.
+
+---
+
+## 9. Progress Log & Where We Left Off
 
 ### Quick scan — how to resume work
 
-> **State:** everything below runs on a laptop with simulated/dummy data — no hardware attached yet.
-> Last finished step: **Step 5 (Thrusters / motion).** Next to do: **Step 6 (systemd auto-start).**
+> **State:** everything below runs on this Pi/laptop with simulated/dummy data — real ESP32
+> hardware is not attached yet.
+> Last finished step: **Phase 2 Part A (ESP32 UART link, Pi side).** Next to do: **Phase 2 Part B
+> (ESP32 firmware — parse MOTOR_COMMAND, drive 5 × ESC, ACK/STATUS/HEARTBEAT).**
 
 | # | Step | What it does (plain) | Status |
 |---|------|----------------------|--------|
@@ -360,10 +533,80 @@ Whenever a feature is added, the README must also document:
 | 3 | Real telemetry | HUD shows real IMU/depth/compass (simulated for now) | ✅ done |
 | 4 | Network / telemetry link | Talks to surface station, heartbeat, commands down | ✅ done |
 | 5 | Thrusters / motion | Joystick → navigation → controller → motors (simulated) | ✅ done |
-| 6 | systemd auto-start | ROV starts itself on boot, start/stop scripts | ⏳ **NEXT** |
+| P1 | **5-thruster hardware model** | Real 5-motor layout mixer (M1–M5) + GPIO/direction config + ESP32 provider seam | ✅ done |
+| 6 | systemd auto-start | ROV starts itself on boot, start/stop scripts | ✅ done |
+| P2A | ESP32 link (Pi side) | `Esp32ThrusterProvider` → UART transport → MOTOR_COMMAND (M1..M5) + ACK/STATUS/HEARTBEAT parse, ESTOP, reconnect, status() | ✅ done |
+| P2B | ESP32 firmware | The ESP32 side: parse MOTOR_COMMAND, drive 5 × ESC PWM, send ACK/STATUS/HEARTBEAT, command watchdog + its own ESTOP | ⏳ **NEXT** |
 | + | Safety extras | Watchdog (kill motors on failure), mission routes, claw | ⬜ pending |
 
 ### Change record (most recent first)
+
+- **2026-09-13 — Phase 2 Part A: ESP32 UART link (Raspberry Pi side)**
+  - `modules/thrusters/uart_transport.py` (new) — pyserial-based transport: open/close/safe-exit,
+    non-blocking read pump with partial-frame buffering + header resync, send with short-write
+    check + auto-reconnect, receive-side validation (header/version/length/CRC-16/CCITT),
+    gracefully degrades when pyserial is missing or the port does not exist.
+  - `modules/thrusters/thruster_manager.py` — real `Esp32ThrusterProvider` behind the existing
+    `ThrusterProvider` ABC: receives the **already-mixed** M1..M5 setpoints from the manager and
+    sends them as MOTOR_COMMAND frames (normalized -1..+1, re-clamped before transmit; int16
+    ×1000), rolls a per-frame sequence, parses ACK/STATUS/HEARTBEAT (ack correlation, missing-ack
+    count, link-stale detection), exposes everything via `status()` for later telemetry (telemetry
+    system untouched). Manager e-stop now latching `notify_estop()` → immediate zeroed ESTOP frame +
+    per-tick zero ESTOP keepalive. `apply()` gained an optional `setpoints=` so the provider never
+    re-mixes. No controller/`mix()`/`ThrusterId`/simulated-provider changes.
+  - `configs/thrusters.yaml` — new `esp32:` block (serial_port / baudrate / timeout_ms /
+    command_rate_hz / heartbeat_timeout_ms / reconnect_interval_s); nothing hardcoded in Python.
+    Default stays `provider: simulated`; flipping to `esp32` without hardware still runs (disconnected
+    state, reconnect retries, no crash).
+  - Wire protocol (frame layout, types, flags, CRC) documented in §7 "ESP32 UART protocol" — this is
+    the contract the Part B firmware must implement.
+  - Added `pyserial` to `config` deps; tests: `tests/test_uart_transport.py` (34 new). Full suite
+    60/60 pass; app boots with `provider: simulated` unchanged; esp32-without-hardware integration
+    verified (connected=False, frames dropped, warning once). GPIO metadata, mixer and controller
+    architecture untouched per the task constraints.
+  - ⚠️ **Part B (ESP32 firmware) not done — next block below.**
+
+- **2026-09-13 — Step 6: systemd auto-start (Raspberry Pi, graphical boot)**
+  - `systemd/rov-controller.service` — unit **template** (`@ROV_USER@`, `@ROV_DIR@`,
+    `@ROV_PYTHON@` tokens), starts after `graphical.target`, `Type=simple`,
+    `Restart=on-failure` (crashes restart, clean exit/stop does not), `RestartSec=5`,
+    `KillMode=control-group`, runs as the project owner, logging to journald.
+  - `scripts/start.sh` (install: self-`sudo`, discovers project root from script location, service
+    user = project owner, venv python, writes `/etc/rov-controller.env` with live-session
+    DISPLAY/XAUTHORITY/QT_QPA_PLATFORM, renders unit via `sed` with token guards, `daemon-reload`
+    + `enable` + `restart`, then `is-active` + `journalctl` on failure), `scripts/stop.sh`
+    (stop only, never disables), `scripts/restart.sh`. All `chmod +x`, `bash -n` clean, and
+    verified with `systemd-analyze verify` (exit 0).
+  - Verified on the Pi (2026-09-13): full lifecycle exercised via an **identical user-instance
+    unit** — start → active + GUI shown (`Main window shown, entering event loop`), SIGKILL →
+    auto-restart with new PID, stop → inactive (no restart loop), restart → active, idempotent
+    start → single instance, app logs captured. Manual launch + all 26 mixer tests pass.
+  - ⚠️ Remaining (needs root): run `sudo bash scripts/start.sh` once, then verify after reboot
+    (commands in §8). **No Phase 2 work done — ESP32 provider still a stub.**
+
+- **2026-08-07 — Phase 1: 5-thruster hardware model (real ROV layout)**
+  - `modules/thrusters/thruster_manager.py` — replaced the 6-motor `MIXING_MATRIX` with the actual
+    5-motor ROV: `ThrusterId` enum (M1_FRONT_VERTICAL, M2_MIDDLE_RIGHT_HORIZONTAL,
+    M3_MIDDLE_LEFT_HORIZONTAL, M4_BACK_RIGHT_VERTICAL, M5_BACK_LEFT_VERTICAL); pure `mix()`
+    consuming only surge/yaw/heave (M1/M4/M5 = heave, M2 = surge+yaw, M3 = surge−yaw), each output
+    clamped to [-1,1]; per-motor `direction` (±1) applied at config time (no guessed signs).
+    `ThrusterProvider` ABC with `SimulatedThrusterProvider` (active) and `Esp32ThrusterProvider`
+    stub (Phase 2 only; setting `provider: esp32` warns + falls back to simulated).
+    `ThrusterManager.emergency_stop()` zeros all five motors independently. Sway/pitch/roll never
+    produce a motor command.
+  - `configs/thrusters.yaml` — `motors` map: GPIO (ESP32 pin, Pi does not drive PWM) + direction:
+    M1→25, M2→33, M3→32, M4→27, M5→26.
+  - `modules/controller/controller.py` — `LEFT`/`RIGHT` link commands now turn (yaw); sway command
+    removed; pitch/roll command slots kept for future but unmixed.
+  - `ui/control_pad.py` — pad stick-x now drives yaw (no sway); ring animates on stick drag.
+  - `ui/main_window.py` — keyboard **A/D** (+ Q/E) turn the ROV; no sway generated; pitch/roll keys
+    retained for future stabilization.
+  - `tests/test_thruster_mixer.py` — 26 tests (neutral/stop/6 axes + combos/saturation/unsupported
+    sway+pitch+roll/direction flip/e-stop/five-output invariant). Run: `python -m unittest
+    tests.test_thruster_mixer -v`.
+  - Verified: all tests pass; headless smoke test (config → ThrusterManager GPIO/direction ==
+    [25,33,32,27,26]; controller→thrusters→sensors chain drives the sim; e-stop zeroes all motors).
+    **No hardware involved, no PWM, no ESP32 networking in Phase 1.**
 
 - **2026-08-06 — Fix: nav-rail hover expand (layout starvation)**
   - Symptom: keeping the cursor on the left sidebar did not expand it, so the icon labels stayed
@@ -493,17 +736,26 @@ Whenever a feature is added, the README must also document:
 
 ### Next session — start here
 
-1. Read this README (§1 goal, §7 sim-first rule, §8 this table).
-2. **Implement Step 6**: systemd auto-start — fill `systemd/rov-controller.service` (run on boot,
-   restart on failure, working dir + venv python), fill `scripts/start.sh` / `stop.sh` /
-   `restart.sh`, document installing/enabling/disabling the service. Nothing in the app itself
-   changes.
-3. Verify after each step (`python app/main.py`, headless test snippet in §9).
-4. When done, update this table (move Step 6 to ✅), add a change-record line, and commit.
+1. Read this README (§1 goal, §7 sim-first rule + ESP32 UART protocol, §9 this table, §8 auto-start).
+2. **Phase 2 Part B — ESP32 firmware (the other end of the UART link):**
+   - Implement the ESP32 program against the protocol in §7: parse MOTOR_COMMAND (M1..M5 int16,
+     MOTOR_SCALE=1000), drive 5 × ESC PWM on GPIO 25/33/32/27/26, reply ACK (echo sequence) /
+     STATUS / HEARTBEAT frames, honor FLAGS ESTOP, and add a command timeout watchdog (~250 ms) so
+     the ESP32 stops the ESCs on its own if the Pi link dies.
+   - Recommend: MicroPython or Arduino-ESP32 sketch under an `esp32/` folder in this repo; reuse the
+     `build_motor_command`/`parse_frame`/`crc16_ccitt` from `uart_transport.py` as the reference.
+   - Verify with a Pi↔ESP32 loopback harness (or the `pytest`-style tests already in
+     `tests/test_uart_transport.py` acting as a frame fixture), then flip
+     `configs/thrusters.yaml` `provider: esp32` on the bench — the app already tolerates a missing
+     device.
+3. Finish Step 6 verify if not yet done on the Pi: run `sudo bash scripts/start.sh`, reboot, confirm
+   per §8.
+4. Verify after each step (`python app/main.py`, headless-test snippet in §10). Update this table +
+   change record when done.
 
 ---
 
-## 9. Working Style (per previous sessions)
+## 10. Working Style (per previous sessions)
 
 Build one small step at a time; verify after each step. Useful commands:
 

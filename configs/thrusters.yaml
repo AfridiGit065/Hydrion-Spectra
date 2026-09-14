@@ -1,8 +1,43 @@
 thrusters:
   enabled: true
+  # provider: simulated   -> runs fully on-device, no hardware required (DEFAULT).
+  # provider: esp32       -> sends the mixed M1..M5 setpoints to the ESP32 ESC
+  #                          controller over UART (Phase 2). If the serial port
+  #                          is unreachable the provider stays "disconnected"
+  #                          and keeps retrying; the app never crashes.
   provider: simulated
   speed_mps: 0.8
   turn_rate_degps: 60.0
-  layout:
-    horizontal: [FL, FR, BL, BR]
-    vertical: [VT1, VT2]
+  # 5-thruster layout (Phase 1).
+  #   gpio      = ESP32 pin for the ESP32 provider (METADATA only —
+  #               the Raspberry Pi never drives these pins).
+  #   direction = physical motor sign (+1/-1). Default +1. Verify each motor
+  #               on the real ROV and flip here if a motor is mounted reversed.
+  motors:
+    M1_FRONT_VERTICAL:
+      gpio: 25
+      direction: 1
+    M2_MIDDLE_RIGHT_HORIZONTAL:
+      gpio: 33
+      direction: 1
+    M3_MIDDLE_LEFT_HORIZONTAL:
+      gpio: 32
+      direction: 1
+    M4_BACK_RIGHT_VERTICAL:
+      gpio: 27
+      direction: 1
+    M5_BACK_LEFT_VERTICAL:
+      gpio: 26
+      direction: 1
+
+  # Phase 2 (Part A): ESP32 ESC controller link.
+  # Everything here is read from config — nothing is hardcoded in Python.
+  esp32:
+    # Serial device of the USB-UART adapter connected to the ESP32. Prefer the
+    # stable /dev/serial/by-id/ symlink over /dev/ttyUSB0.
+    serial_port: "/dev/ttyUSB0"
+    baudrate: 460800
+    timeout_ms: 100           # read/write timeout on the serial port
+    command_rate_hz: 50       # max MOTOR_COMMAND frames per second to the ESP32
+    heartbeat_timeout_ms: 250 # no frame from the ESP32 for this long -> link stale
+    reconnect_interval_s: 1.0 # min seconds between serial (re)open attempts

@@ -484,11 +484,18 @@ class MainWindow(QMainWindow):
             * self.key_speed
 
     def _keyboard_state(self):
+        # A/D (left/right) and Q/E (yaw_left/yaw_right) both turn the ROV;
+        # sway is unsupported on the 5-thruster layout. Pitch/roll keys stay
+        # for future stabilization (the 5-thruster mixer ignores them).
+        yaw = float(np.clip(
+            self._axis("yaw_right", "yaw_left") + self._axis("right", "left"),
+            -1.0, 1.0,
+        ))
         return MotionState(
             surge=self._axis("forward", "back"),
-            sway=self._axis("right", "left"),
+            sway=0.0,
             heave=self._axis("up", "down"),
-            yaw=self._axis("yaw_right", "yaw_left"),
+            yaw=yaw,
             pitch=self._axis("pitch_up", "pitch_down"),
             roll=self._axis("roll_right", "roll_left"),
             boost="boost" in self._pressed_actions,
