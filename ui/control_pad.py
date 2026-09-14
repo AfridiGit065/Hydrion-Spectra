@@ -41,6 +41,11 @@ class ControlPad3D(QWidget):
     def set_yaw(self, value):
         self._yaw_cmd = max(-1.0, min(1.0, value))
 
+    def reset(self):
+        self._joy = QPointF()
+        self._yaw_cmd = 0.0
+        self.update()
+
     def _tick(self):
         if self._yaw_cmd:
             self._ring_angle += 1.6 * self._yaw_cmd

@@ -1,17 +1,34 @@
 """UART transport for the ESP32 ESC controller (Phase 2 — Raspberry Pi side).
 
-Moves binary packets between the Raspberry Pi and the ESP32 over a serial
-port (pyserial). Covers:
+Matches the ESP32 firmware byte-for-byte (the firmware is the source of
+truth). Frame layout (little-endian):
 
-  * open / close / safe-exit semantics
-  * sending packets with per-command write timeouts
-  * a non-blocking read pump with partial-frame resync
-  * receive-side validation: header sync, version, length, CRC-16
-  * transport-level liveness stats + graceful reconnect
+    BYTE   FIELD        NOTES
+    0-1    HEADER      0xAA 0x55
+    2      VERSION      0x01
+    3      TYPE         0x01 MOTOR_COMMAND (Pi->ESP32) | 0x02 ESTOP (Pi->ESP32)
+                       0x81 ACK | 0x82 STATUS (ESP32->Pi)
+    4      LENGTH       payload length in bytes
+    5-6    SEQUENCE     uint16 little-endian, monotonically increasing
+    7..    PAYLOAD      type-specific (see below)
+    last-2 CRC16        CRC-16/CCITT-FALSE over the WHOLE frame from byte 0
+                        (the 0xAA 0x55 header) through the last payload byte,
+                        NOT including the CRC trailer. The ESP32 firmware
+                        computes crc16(packet, packetLength - 2).
 
-This module is *transport only*: it knows nothing about motion or motors.
-The ``Esp32ThrusterProvider`` owns message types, sequence numbers, flags and
-the ESTOP logic on top of this transport.
+MOTOR_COMMAND payload (11 bytes): M1..M5 int16 * MOTOR_SCALE (1000),
+normalized -1.0..+1.0 <-> -1000..+1000, then a FLAGS byte (must be <= 0x03;
+the firmware otherwise ACKs with status 4).
+
+ESTOP payload: empty. The ESP32 latches E-STOP; motor commands are ignored
+(ACK status 7) until the ESP32 is reset, then a zeroed re-arm handshake is
+required (see Esp32ThrusterProvider).
+
+ACK payload (declared length 3): ACK_STATUS(1) followed by ECHO_SEQ(2).
+ACK_STATUS: 0 success, 1 CRC error, 2 invalid payload length, 3 invalid motor
+value, 4 invalid flags, 5 old sequence, 6 unknown packet type, 7 estop active.
+
+STATUS payload (14 bytes): failsafe(1) estop(1) M1..M5 int16(10).
 """
 
 import struct
@@ -25,21 +42,41 @@ except ImportError:  # pragma: no cover - environment-specific
 HEADER = b"\xaa\x55"
 PROTOCOL_VERSION = 0x01
 
-# Message types
-MSG_MOTOR_COMMAND = 0x01  # Pi -> ESP32: 5 motor setpoints (M1..M5)
-MSG_ACK = 0x02            # ESP32 -> Pi: acknowledgement of a command
-MSG_NACK = 0x03           # ESP32 -> Pi: command rejected (re-parse / retransmit)
-MSG_STATUS = 0x04         # ESP32 -> Pi: status / diagnostics frame
-MSG_HEARTBEAT = 0x05      # ESP32 -> Pi: periodic liveness frame
+# Message types (both directions)
+MSG_MOTOR_COMMAND = 0x01  # Pi -> ESP32: 5 motor setpoints (M1..M5) + flags
+MSG_ESTOP = 0x02          # Pi -> ESP32: emergency stop (latches on the ESP32)
+MSG_ACK = 0x81            # ESP32 -> Pi: acknowledgement (echoes sequence + status)
+MSG_STATUS = 0x82         # ESP32 -> Pi: periodic status (failsafe/estop/M1..M5)
 
-# FLAGS byte
-FLAG_ESTOP = 0x01         # emergency stop asserted — ESP32 must halt all ESCs now
-FLAG_HEARTBEAT_REQ = 0x02 # Pi asks the ESP32 for an immediate heartbeat
+# ACK status codes (ESP32 firmware)
+ACK_OK = 0
+ACK_CRC = 1
+ACK_BAD_LENGTH = 2
+ACK_BAD_MOTOR = 3
+ACK_BAD_FLAGS = 4
+ACK_OLD_SEQ = 5
+ACK_UNKNOWN_TYPE = 6
+ACK_ESTOP = 7
+ACK_NAMES = {
+    ACK_OK: "OK",
+    ACK_CRC: "CRC error",
+    ACK_BAD_LENGTH: "invalid payload length",
+    ACK_BAD_MOTOR: "invalid motor value",
+    ACK_BAD_FLAGS: "invalid flags",
+    ACK_OLD_SEQ: "old sequence",
+    ACK_UNKNOWN_TYPE: "unknown packet type",
+    ACK_ESTOP: "estop active",
+}
 
 # Motor int16 scale: normalized [-1.0, +1.0] <-> [-1000, +1000].
 MOTOR_SCALE = 1000
 
-_MAX_RX_CHUNK = 1024
+# Maximum frame size (ESP32 firmware MAX_PACKET_SIZE = 64).
+MAX_FRAME_SIZE = 64
+
+_MOTOR_COMMAND_PAYLOAD = 5 * 2 + 1  # 5 x int16 + FLAGS byte == 11
+_MIN_HEAD = 7  # header(2) + version + type + length + sequence(2)
+_CRC_SIZE = 2
 
 
 class IncompleteFrame(Exception):
@@ -49,30 +86,30 @@ class IncompleteFrame(Exception):
 class Packet:
     """Decoded frame."""
 
-    __slots__ = ("version", "mtype", "length", "sequence", "flags", "payload", "crc")
+    __slots__ = ("version", "mtype", "length", "sequence", "payload", "crc")
 
-    def __init__(self, version, mtype, length, sequence, flags, payload, crc):
+    def __init__(self, version, mtype, length, sequence, payload, crc):
         self.version = version
         self.mtype = mtype
         self.length = length
         self.sequence = sequence
-        self.flags = flags
         self.payload = payload
         self.crc = crc
 
     def __repr__(self):
         return (
-            "Packet(version=%d mtype=0x%02x seq=%d flags=0x%02x len=%d)"
-            % (self.version, self.mtype, self.sequence, self.flags, self.length)
+            "Packet(version=%d mtype=0x%02x seq=%d len=%d)"
+            % (self.version, self.mtype, self.sequence, self.length)
         )
 
 
 class UartTransport:
     """Low-level serial packet transport.
 
-    Polled (no background threads): call :meth:`pump` each tick to absorb
+    Polled (no background threads here): call :meth:`pump` each tick to absorb
     incoming bytes and enqueue parsed packets, then :meth:`read_packets` to
-    drain them. Frames are written through :meth:`send`.
+    drain them. Frames are written through :meth:`send`. All serial I/O is
+    non-blocking (short reads via ``in_waiting``, write timeouts bounded).
     """
 
     def __init__(self, config=None, logger=None, serial_factory=None):
@@ -92,6 +129,7 @@ class UartTransport:
         self._rx = bytearray()
         self._pending = []
         self._last_open_attempt = 0.0
+        self._connected_logged = False
         self.stats = dict(
             tx_frames=0,
             rx_frames=0,
@@ -137,17 +175,27 @@ class UartTransport:
                 write_timeout=self.write_timeout,
             )
             self.stats["last_error"] = None
+            if self.logger is not None and not self._connected_logged:
+                self._connected_logged = True
+                self.logger.info(
+                    "ESP32 connected: %s @ %d baud", self.port, self.baudrate
+                )
             return True
         except (OSError, ValueError) as exc:  # missing device, bad params, ...
             self.stats["last_error"] = str(exc)
             self.stats["open_failures"] += 1
             self._ser = None
+            if self.logger is not None:
+                self.logger.warning("ESP32 UART open failed: %s", exc)
             return False
 
     def close(self):
         """Close the port safely (idempotent, never raises)."""
         self._close_ser()
         self._rx = bytearray()
+        if self.logger is not None and self._connected_logged:
+            self._connected_logged = False
+            self.logger.info("ESP32 disconnected")
 
     def _close_ser(self):
         if self._ser is not None:
@@ -175,6 +223,8 @@ class UartTransport:
             self.stats["dropped_frames"] += 1
             self.stats["reconnect_attempts"] += 1
             self._close_ser()
+            if self.logger is not None:
+                self.logger.warning("ESP32 UART write failed: %s (reconnecting)", exc)
             return False
 
     def _flush(self):
@@ -194,7 +244,7 @@ class UartTransport:
             return
         if waiting:
             try:
-                chunk = self._ser.read(min(waiting, _MAX_RX_CHUNK))
+                chunk = self._ser.read(min(waiting, 1024))
             except (OSError, ValueError):  # pragma: no cover
                 self._close_ser()
                 return
@@ -203,8 +253,7 @@ class UartTransport:
         packets = self._parse_available()
         if packets:
             self._pending.extend(packets)
-            if self.stats["last_rx_at"] is None:
-                self.stats["last_rx_at"] = time.time()
+            self.stats["last_rx_at"] = time.time()
 
     def read_packets(self):
         packets = list(self._pending)
@@ -224,13 +273,14 @@ class UartTransport:
         packets = []
         data = self._rx
         while data:
-            if len(data) < len(HEADER) or data[: len(HEADER)] != HEADER:
+            if len(data) < _MIN_HEAD or data[: len(HEADER)] != HEADER:
                 idx = bytes(data).find(HEADER)
                 if idx < 0:
                     self._rx = bytearray()
                     break
                 del data[:idx]
                 self.stats["resyncs"] += 1
+                continue
             try:
                 packet, consumed = parse_frame(bytes(data), version=self.version)
             except IncompleteFrame:
@@ -255,7 +305,7 @@ class UartTransport:
 
 
 def crc16_ccitt(data):
-    """CRC-16/CCITT-FALSE over ``bytes``."""
+    """CRC-16/CCITT-FALSE over ``bytes`` (same algorithm as the ESP32)."""
     crc = 0xFFFF
     for byte in data:
         crc ^= (byte << 8) & 0xFFFF
@@ -268,17 +318,20 @@ def clamp(value, lo=-1.0, hi=1.0):
     return max(lo, min(hi, float(value)))
 
 
-def build_frame(sequence, mtype, payload, flags=0, version=PROTOCOL_VERSION):
+def build_frame(sequence, mtype, payload, version=PROTOCOL_VERSION):
     """Frame layout (little-endian):
 
-        HEADER | VERSION | TYPE | LENGTH | SEQUENCE | FLAGS | PAYLOAD | CRC16
+        HEADER | VERSION | TYPE | LENGTH | SEQ(16) | PAYLOAD | CRC16
 
-    CRC covers VERSION .. PAYLOAD (everything after the 2-byte header).
+    CRC covers the whole frame **including the 0xAA 0x55 header** and up to
+    the last payload byte (the ESP32 firmware computes crc over
+    ``packet[0 : len-2]``). Sequence is a 16-bit counter.
     """
     length = len(payload)
-    head = struct.pack("<BBBBB", version, mtype, length, sequence & 0xFF, flags)
-    crc = crc16_ccitt(head + payload)
-    return HEADER + head + payload + struct.pack("<H", crc)
+    head = struct.pack("<BBBH", version, mtype, length, sequence & 0xFFFF)
+    frame = HEADER + head + payload
+    crc = crc16_ccitt(frame)
+    return frame + struct.pack("<H", crc)
 
 
 def motor_values_to_int16(motors):
@@ -294,12 +347,18 @@ def build_motor_command(sequence, motors, flags=0, version=PROTOCOL_VERSION):
     """Build the Pi -> ESP32 MOTOR_COMMAND frame.
 
     ``motors`` must be the five already-mixed, clamped setpoints in
-    M1..M5 (ThrusterId) order. Values are re-clamped here as a hard
-    guarantee before transmission.
+    M1..M5 (ThrusterId) order. Values are re-clamped here as a hard guarantee
+    before transmission. Payload = 5 x int16 + FLAGS byte (11 bytes).
     """
-    return build_frame(
-        sequence, MSG_MOTOR_COMMAND, motor_values_to_int16(motors), flags, version
-    )
+    if flags & 0xFC:
+        raise ValueError("reserved FLAGS bits set (firmware ACKs status 4)")
+    payload = motor_values_to_int16(motors) + struct.pack("<B", flags & 0xFF)
+    return build_frame(sequence, MSG_MOTOR_COMMAND, payload, version)
+
+
+def build_estop(sequence, version=PROTOCOL_VERSION):
+    """Build the Pi -> ESP32 ESTOP frame (empty payload; latches E-STOP)."""
+    return build_frame(sequence, MSG_ESTOP, b"", version)
 
 
 def parse_frame(data, version=PROTOCOL_VERSION):
@@ -309,34 +368,65 @@ def parse_frame(data, version=PROTOCOL_VERSION):
     are needed, and ``ValueError`` when the frame is present but invalid
     (wrong version, bad length, or CRC mismatch).
     """
-    if len(data) < len(HEADER) or data[: len(HEADER)] != HEADER:
+    if len(data) < _MIN_HEAD or data[: len(HEADER)] != HEADER:
         raise ValueError("missing header")
-    # minimum fixed fields before the payload length is known:
-    # header(2) + version,type,length,sequence,flags(5) + crc(2)
-    if len(data) < len(HEADER) + 5 + 2:
-        raise IncompleteFrame()
     length = data[4]
-    total = len(HEADER) + 5 + length + 2  # header + fixed + payload + crc
+    total = _MIN_HEAD + length + _CRC_SIZE
+    if total > MAX_FRAME_SIZE:
+        raise ValueError("invalid length")
     if len(data) < total:
         raise IncompleteFrame()
     ver = data[2]
     mtype = data[3]
-    sequence = data[5]
-    flags = data[6]
-    payload = data[7 : 7 + length]
-    crc = struct.unpack_from("<H", data, 7 + length)[0]
-    body = data[2 : 7 + length]  # version .. payload (excludes header and crc)
+    sequence = struct.unpack_from("<H", data, 5)[0]
+    payload = data[_MIN_HEAD : _MIN_HEAD + length]
+    crc = struct.unpack_from("<H", data, _MIN_HEAD + length)[0]
     if ver != version:
         raise ValueError("version mismatch")
-    if crc16_ccitt(body) != crc:
+    if crc16_ccitt(data[:total - _CRC_SIZE]) != crc:
         raise ValueError("crc")
     packet = Packet(
         version=ver,
         mtype=mtype,
         length=length,
         sequence=sequence,
-        flags=flags,
         payload=bytes(payload),
         crc=crc,
     )
     return packet, total
+
+
+# -- payload decoders -------------------------------------------------------
+
+
+def decode_motor_command(payload):
+    """Return ``(motors, flags)`` from a MOTOR_COMMAND payload (11 bytes)."""
+    if len(payload) < _MOTOR_COMMAND_PAYLOAD:
+        raise ValueError("bad motor payload")
+    motors = struct.unpack("<5h", payload[:10])
+    return motors, payload[10]
+
+
+def decode_ack(payload):
+    """Return ``(ack_status, echo_sequence)`` from an ACK payload.
+
+    The ESP32 firmware declares LENGTH=3 but writes 5 payload bytes
+    (status + 2-byte echo). The CRC covers bytes 0..9 either way, so framing
+    is consistent; only the first 3 bytes are meaningful per the protocol.
+    """
+    if len(payload) < 3:
+        raise ValueError("bad ack payload")
+    status = payload[0]
+    echo = payload[1] | (payload[2] << 8)
+    return status, echo
+
+
+def decode_status(payload):
+    """Return ``dict(failsafe, estop, motors)`` from a STATUS payload (14 bytes)."""
+    if len(payload) < 12:
+        raise ValueError("bad status payload")
+    return {
+        "failsafe": bool(payload[0]),
+        "estop": bool(payload[1]),
+        "motors": tuple(struct.unpack("<5h", payload[2:12])),
+    }

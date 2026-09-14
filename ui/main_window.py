@@ -5,7 +5,7 @@ import time
 import cv2
 import numpy as np
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from modules.controller.controller import MotionState
+from modules.thrusters.thruster_manager import ThrusterId
 from ui.control_pad import ControlPad3D
 from ui.glass import GlassPanel, NavButton, StatusPill, caps_label
 from ui.sections import build as build_sections
@@ -50,12 +51,13 @@ class MainWindow(QMainWindow):
     def __init__(self, camera_manager, overlay=None, hud_provider=None,
                  controller=None, keymap=None, service_manager=None,
                  config_manager=None, telemetry=None, log_dir="logs",
-                 gcs_config=None):
+                 gcs_config=None, thrusters=None):
         super().__init__()
         self.camera = camera_manager
         self.overlay = overlay
         self.hud_provider = hud_provider
         self.controller = controller
+        self.thrusters = thrusters
         self.telemetry = telemetry
         self.log_dir = log_dir
         self.gcs = gcs_config or {}
@@ -63,6 +65,7 @@ class MainWindow(QMainWindow):
         self._pressed_actions = set()
         self._key_actions = self._build_keymap(keymap or {})
         self._armed = True
+        self._estop_active = False
         self._recording = False
         self._writer = None
         self._lights = False
@@ -80,11 +83,13 @@ class MainWindow(QMainWindow):
             "config_manager": config_manager,
             "sensors": hud_provider,
             "controller": controller,
+            "thrusters": thrusters,
             "telemetry": telemetry,
             "log_dir": log_dir,
             "fps": lambda: f"{self._fps:.0f}",
             "uptime": self._uptime_str,
             "armed": lambda: self._armed,
+            "estop": lambda: self._estop_active,
             "link_ok": lambda: self._link_ok(),
         }
 
@@ -98,6 +103,10 @@ class MainWindow(QMainWindow):
         self.refresh = QTimer(self)
         self.refresh.timeout.connect(self._refresh_static)
         self.refresh.start(1000)
+
+        self.fast = QTimer(self)
+        self.fast.timeout.connect(self._refresh_fast)
+        self.fast.start(100)
 
         QApplication.instance().installEventFilter(self)
 
@@ -161,11 +170,17 @@ class MainWindow(QMainWindow):
         lay.addWidget(workspace)
         lay.addStretch(1)
 
+        self.rov_pill = StatusPill("ROV --", "info")
+        self.esp32_pill = StatusPill("ESP32 --", "info")
         self.batt_pill = StatusPill("BATT --", "info")
         self.link_pill = StatusPill("LINK --", "info")
         self.uptime_pill = StatusPill("UP 00:00", "info")
         self.mode_pill = StatusPill("MANUAL", "ok")
-        for pill in (self.batt_pill, self.link_pill, self.uptime_pill, self.mode_pill):
+        self.depth_pill = StatusPill("DEPTH --", "info")
+        self.estop_pill = StatusPill("E-STOP READY", "ok")
+        for pill in (self.rov_pill, self.esp32_pill, self.mode_pill,
+                     self.depth_pill, self.batt_pill, self.estop_pill,
+                     self.link_pill, self.uptime_pill):
             lay.addWidget(pill)
             lay.addSpacing(6)
         lay.addSpacing(10)
@@ -242,7 +257,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(cr)
         lay.addStretch(1)
         self.foot = {}
-        for name in ("FPS", "CPU", "RAM", "STORAGE", "DEPTH", "LATENCY"):
+        for name in ("FPS", "CPU", "RAM", "STORAGE", "DEPTH", "LATENCY",
+                     "ESP32", "THRUST"):
             lab = QLabel(f"{name}: --")
             lab.setStyleSheet(
                 f"color: {C['on_surface_variant']}; font-size: 11px; "
@@ -316,6 +332,11 @@ class MainWindow(QMainWindow):
 
         self.flyout = self._build_flyout(container)
 
+        self.estop_btn = _DockButton("\u26d4", "E-STOP", danger=True)
+        self.estop_btn.clicked.connect(self._estop)
+        self.rearm_btn = _DockButton("\u27f3", "RE-ARM")
+        self.rearm_btn.clicked.connect(self._rearm)
+
         self.dock = self._build_dock(container)
 
         self.pad = ControlPad3D(container)
@@ -334,6 +355,39 @@ class MainWindow(QMainWindow):
         self.heave_hint.setParent(container)
         self.heave_hint.adjustSize()
         self.heave_hint.show()
+
+        self.thruster_panel = GlassPanel("THRUSTERS M1-M5", parent=container)
+        self.thruster_panel._values = {}
+        motor_rows = {}
+        for thruster in ThrusterId:
+            row = _MotorRow(thruster)
+            motor_rows[thruster] = row
+            self.thruster_panel.add_row(row)
+            self.thruster_panel._values[thruster.name] = row
+        self.thruster_panel.setFixedWidth(230)
+        self.thruster_panel.adjustSize()
+        self.thruster_panel.show()
+        self._motor_rows = motor_rows
+
+        self.motion_panel = GlassPanel("MOTION SURGE / YAW / HEAVE", parent=container)
+        self.motion_rows = {}
+        for axis in ("surge", "yaw", "heave"):
+            row = _AxisRow(axis)
+            self.motion_rows[axis] = row
+            self.motion_panel.add_row(row)
+        self.motion_panel.setFixedWidth(230)
+        self.motion_panel.adjustSize()
+        self.motion_panel.show()
+
+        self._status_toast = QLabel("")
+        self._status_toast.setStyleSheet(
+            f"background: rgba(17, 32, 54, 0.9); color: {C['on_surface']}; "
+            f"border: 1px solid {C['primary']}; border-radius: 10px; "
+            f"padding: 8px 14px; font-weight: 700; font-size: 13px;"
+        )
+        self._status_toast.setParent(container)
+        self._status_toast.adjustSize()
+        self._status_toast.hide()
 
         self._reposition_overlays()
         return container
@@ -378,7 +432,8 @@ class MainWindow(QMainWindow):
         self.snap_btn.clicked.connect(self._snap)
         self.light_btn = _DockButton("\u2600", "LIGHTS")
         self.light_btn.clicked.connect(self._toggle_lights)
-        for b in (self.armed_btn, self.rec_btn, self.snap_btn, self.light_btn):
+        for b in (self.armed_btn, self.rec_btn, self.snap_btn, self.light_btn,
+                  self.estop_btn, self.rearm_btn):
             lay.addWidget(b)
         dock.adjustSize()
         dock.show()
@@ -389,9 +444,53 @@ class MainWindow(QMainWindow):
         self.armed_btn.set_active(self._armed)
         self.armed_btn.set_label("ARMED" if self._armed else "DISARMED")
         self.mode_pill.setText("MANUAL" if self._armed else "DISARMED")
-        self.mode_pill.set_status("ok" if self._armed else "bad")
+        self.mode_pill.set_status("ok" if self._armed else "warn")
+        self.estop_pill.setText("E-STOP ACTIVE" if self._estop_active else "E-STOP READY")
+        self.estop_pill.set_status("bad" if self._estop_active else "ok")
+        self.rov_pill.setText("ROV E-STOP" if self._estop_active
+                              else ("ROV ARMED" if self._armed else "ROV DISARMED"))
+        self.rov_pill.set_status("bad" if self._estop_active else
+                                 ("ok" if self._armed else "warn"))
+        self.estop_btn.set_active(self._estop_active)
+        self.rearm_btn.set_active(False)
+
+    def _estop(self):
+        self._estop_active = True
+        self._armed = False
+        if self.controller is not None:
+            self.controller.kill()
+            self.controller.set_input("keyboard", MotionState())
+            self.controller.set_input("pad", MotionState())
+        if self.thrusters is not None:
+            self.thrusters.emergency_stop()
+        self.pad.set_yaw(0.0)
+        self.pad.reset()
+        self._refresh_armed()
+        self.status_message("EMERGENCY STOP ENGAGED - all thrusters halted", 3000)
+
+    def _rearm(self):
+        self._estop_active = False
+        if self.thrusters is not None:
+            self.thrusters.clear_emergency_stop()
+        if self.controller is not None:
+            self.controller.recover()
+        self._armed = True
+        self.estop_btn.set_active(False)
+        self._refresh_armed()
+        self.status_message("RE-ARMED - thrusters handshake in progress", 3000)
+
+    def status_message(self, text, ms=2000):
+        if hasattr(self, "_status_toast"):
+            self._status_toast.setText(text)
+            self._status_toast.adjustSize()
+            self._status_toast.show()
+            from PySide6.QtCore import QTimer as _T
+            _T.singleShot(ms, self._status_toast.hide)
 
     def _toggle_armed(self):
+        if self._estop_active:
+            self.status_message("E-STOP ACTIVE - press RE-ARM first", 2500)
+            return
         self._armed = not self._armed
         if self.controller is not None:
             if self._armed:
@@ -458,6 +557,10 @@ class MainWindow(QMainWindow):
         self.live.move(m, m)
         self.telemetry_panel.move(m, self.live.y() + self.live.height() + 8)
         self.sonar.move(cw - self.sonar.width() - m, m)
+        thruster_x = cw - self.thruster_panel.width() - m
+        thruster_y = self.sonar.y() + self.sonar.height() + 10
+        self.thruster_panel.move(thruster_x, thruster_y)
+        self.motion_panel.move(thruster_x, thruster_y + self.thruster_panel.height() + 8)
         self.dock.move(max(0, (cw - self.dock.sizeHint().width()) // 2),
                        ch - self.dock.sizeHint().height() - 12)
         self.pad.move(cw - self.pad.width() - m, ch - self.pad.height() - m)
@@ -467,8 +570,12 @@ class MainWindow(QMainWindow):
         fy = self._flyout_tab.y() + 2
         self._flyout_panel.move(20, fy)
         for w in (self.live, self.sonar, self.telemetry_panel, self.dock, self.pad,
-                  self.heave_hint, self._flyout_tab, self._flyout_panel):
+                  self.heave_hint, self._flyout_tab, self._flyout_panel,
+                  self.thruster_panel, self.motion_panel, self._status_toast):
             w.raise_()
+        self._status_toast.move(
+            max(0, (cw - self._status_toast.width()) // 2),
+            ch - self._status_toast.height() - 16)
 
     def _set_section(self, key):
         self.stack.setCurrentWidget(self._pages[key])
@@ -507,10 +614,7 @@ class MainWindow(QMainWindow):
             return
         if action == "kill":
             if pressed:
-                self._armed = False
-                if self.controller is not None:
-                    self.controller.kill()
-                self._refresh_armed()
+                self._estop()
             return
         if pressed:
             self._pressed_actions.add(action)
@@ -538,7 +642,7 @@ class MainWindow(QMainWindow):
             state = self.hud_provider.get_state()
             self.sonar.set_state(state)
             if self.overlay is not None:
-                frame = self.overlay.render(frame, state)
+                frame = self.overlay.render(frame, state, extra=self._hud_extra())
         if self._lights:
             frame = np.clip(frame.astype(np.int16) + 36, 0, 255).astype(np.uint8)
 
@@ -590,6 +694,16 @@ class MainWindow(QMainWindow):
             if self.hud_provider is not None else "DEPTH: --")
         self.foot["LATENCY"].setText(
             f"LATENCY: {self.gcs.get('latency_ms', 12)}ms")
+        if self.thrusters is not None:
+            status = self.thrusters.get_provider_status()
+            if status is not None:
+                self.foot["ESP32"].setText(
+                    f"ESP32: {status.get('provider', '--').upper()} "
+                    f"{'OK' if status.get('link_alive') else ('STALE' if status.get('connected') else 'OFF')}")
+            else:
+                self.foot["ESP32"].setText("ESP32: SIMULATED")
+            self.foot["THRUST"].setText(
+                f"THRUST: {_thrust_level(self.thrusters.last_setpoints)}")
 
         if self._flyout_panel.isVisible():
             self.log_body.setText(_tail(self.log_dir, "mission.log", 8))
@@ -599,11 +713,64 @@ class MainWindow(QMainWindow):
         if callable(upd):
             upd()
 
+    def _refresh_fast(self):
+        """100 ms panel refresh: thrusters, motion, link/estop pills."""
+        state = self.hud_provider.get_state() if self.hud_provider is not None else None
+        if state is not None:
+            self.depth_pill.setText(f"DEPTH {state.depth:.1f}m")
+            self.depth_pill.set_status("info")
+        else:
+            self.depth_pill.setText("DEPTH --")
+
+        esp_status = "info"
+        esp_text = "ESP32 --"
+        if self.thrusters is not None:
+            status = self.thrusters.get_provider_status()
+            if status is None:
+                esp_status, esp_text = "info", "ESP32 SIM"
+            elif status.get("link_alive") and status.get("connected"):
+                esp_status, esp_text = "ok", "ESP32 OK"
+            elif status.get("connected"):
+                esp_status, esp_text = "warn", "ESP32 STALE"
+            else:
+                esp_status, esp_text = "bad", "ESP32 OFF"
+        self.esp32_pill.setText(esp_text)
+        self.esp32_pill.set_status(esp_status)
+
+        if self.thrusters is not None:
+            for thruster, row in self._motor_rows.items():
+                row.set_value(self.thrusters.last_setpoints.get(thruster, 0.0))
+            motion = self.controller.last_motion if self.controller is not None else MotionState()
+            for axis in ("surge", "yaw", "heave"):
+                value = getattr(motion, axis)
+                self.motion_rows[axis].set_value(value)
+        elif self.controller is not None:
+            motion = self.controller.last_motion
+            for axis in ("surge", "yaw", "heave"):
+                self.motion_rows[axis].set_value(getattr(motion, axis))
+
     def _current_section_key(self):
         for key, widget in self._pages.items():
             if widget is self.stack.currentWidget():
                 return key
         return "dashboard"
+
+    def _hud_extra(self):
+        extra = {"mode": "MANUAL", "armed": self._armed, "estop": self._estop_active}
+        if self.thrusters is not None:
+            status = self.thrusters.get_provider_status()
+            if status is None:
+                extra["esp32"] = "SIM"
+            elif status.get("link_alive") and status.get("connected"):
+                extra["esp32"] = "OK"
+            elif status.get("connected"):
+                extra["esp32"] = "STALE"
+            else:
+                extra["esp32"] = "OFF"
+            extra["thrust"] = self.thrusters.last_setpoints
+        else:
+            extra["esp32"] = "OFF"
+        return extra
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -740,3 +907,122 @@ class _DockButton(QWidget):
 
     def set_label(self, text):
         self.lbl.setText(text)
+
+
+class _CenterMeter(QWidget):
+    """Bipolar meter that animates motor/thruster output."""
+
+    def __init__(self, low=-1.0, high=1.0, parent=None):
+        super().__init__(parent)
+        self.low = low
+        self.high = high
+        self.value = 0.0
+        self.setFixedHeight(14)
+        self.setMinimumWidth(90)
+        self._active = False
+
+    def set_value(self, v):
+        v = max(self.low, min(self.high, float(v)))
+        self._active = abs(v) > 0.03
+        if abs(v - self.value) > 1e-3:
+            self.value = v
+            self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        h = self.height()
+        track_y = (h - 4) // 2
+        center_x = w // 2
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#0a1730"))
+        p.drawRoundedRect(0, track_y, w, 4, 2, 2)
+
+        p.setPen(QPen(QColor(100, 255, 218, 80), 1))
+        p.drawLine(center_x, track_y + 1, center_x, track_y + 3)
+
+        if abs(self.value) >= 1e-3:
+            frac = (self.value - self.low) / max(1e-9, self.high - self.low) - 0.5
+            fill_w = int(abs(frac) * w * 0.48)
+            fill_x = center_x if frac < 0 else center_x + 1
+            color = QColor("#ffd364" if frac < 0 else "#64ffda")
+            p.setBrush(color)
+            p.drawRoundedRect(fill_x, track_y, fill_w, 4, 2, 2)
+        p.end()
+
+
+class _MotorRow(QWidget):
+    def __init__(self, thruster, parent=None):
+        super().__init__(parent)
+        self.thruster = thruster
+        from modules.thrusters.thruster_manager import _ROLES
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(8)
+        self.label = QLabel(str(thruster.name.replace("_", " ")))
+        self.label.setStyleSheet(
+            f"color: {C['on_surface_variant']}; font-weight: 700; font-size: 10px; "
+            f"letter-spacing: 1px;"
+        )
+        self.label.setMinimumWidth(80)
+        lay.addWidget(self.label)
+        self.meter = _CenterMeter()
+        lay.addWidget(self.meter, 1)
+        self.value = QLabel("0%")
+        self.value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.value.setMinimumWidth(38)
+        self.value.setStyleSheet(
+            f"font-family: {FONT_DATA}; font-size: 12px; color: {C['primary']};"
+        )
+        lay.addWidget(self.value)
+        self.setStyleSheet(
+            "background: rgba(17, 32, 54, 0.6); border-top: 1px solid "
+            "rgba(100, 255, 218, 0.5); border-radius: 6px;"
+        )
+
+    def set_value(self, v):
+        self.meter.set_value(v)
+        self.value.setText(f"{int(v * 100):+d}%")
+        color = C['error'] if abs(v) > 0.95 else (C['secondary'] if abs(v) < 0.02 else C['primary'])
+        self.value.setStyleSheet(f"font-family: {FONT_DATA}; font-size: 12px; color: {color};")
+
+
+class _AxisRow(QWidget):
+    def __init__(self, name, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(8)
+        self.label = QLabel(name.upper())
+        self.label.setStyleSheet(
+            f"color: {C['on_surface_variant']}; font-weight: 700; font-size: 10px; "
+            f"letter-spacing: 1px;"
+        )
+        self.label.setMinimumWidth(48)
+        lay.addWidget(self.label)
+        self.meter = _CenterMeter()
+        lay.addWidget(self.meter, 1)
+        self.value = QLabel("0%")
+        self.value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.value.setMinimumWidth(38)
+        self.value.setStyleSheet(
+            f"font-family: {FONT_DATA}; font-size: 12px; color: {C['secondary']};"
+        )
+        lay.addWidget(self.value)
+        self.setStyleSheet(
+            "background: rgba(17, 32, 54, 0.6); border-top: 1px solid "
+            "rgba(100, 255, 218, 0.5); border-radius: 6px;"
+        )
+
+    def set_value(self, v):
+        self.meter.set_value(v)
+        self.value.setText(f"{int(v * 100):+d}%")
+        color = C['error'] if abs(v) > 0.95 else (C['secondary'] if abs(v) < 0.02 else C['primary'])
+        self.value.setStyleSheet(f"font-family: {FONT_DATA}; font-size: 12px; color: {color};")
+
+
+def _thrust_level(setpoints):
+    peak = max(abs(v) for v in setpoints.values()) if setpoints else 0.0
+    return f"{int(peak * 100):d}%" if peak > 0.01 else "IDLE"

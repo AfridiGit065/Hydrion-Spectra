@@ -1,16 +1,27 @@
 thrusters:
   enabled: true
-  # provider: simulated   -> runs fully on-device, no hardware required (DEFAULT).
-  # provider: esp32       -> sends the mixed M1..M5 setpoints to the ESP32 ESC
-  #                          controller over UART (Phase 2). If the serial port
-  #                          is unreachable the provider stays "disconnected"
-  #                          and keeps retrying; the app never crashes.
+  # ------------------------------------------------------------------
+  # PROVIDER SELECTION (explicit):
+  #
+  #   provider: simulated   -> runs fully on-device, no hardware required (DEFAULT).
+  #                            Drives the simulated sensor state with the real
+  #                            mixer outputs. Safe to leave enabled.
+  #
+  #   provider: esp32       -> REAL HARDWARE. Sends the already-mixed M1..M5
+  #                            setpoints to the ESP32 ESC controller over UART
+  #                            (Phase 2, 50 Hz stream). To switch, edit ONE line:
+  #                                provider: simulated  ->  provider: esp32
+  #                            Also make sure `esp32.serial_port` below points at
+  #                            the USB-UART adapter. If the port is unreachable the
+  #                            app keeps running: motors are FAILSAFE zeroed, the
+  #                            link is shown in the UI as disconnected, and the
+  #                            provider retries reconnects. It never crashes.
+  # ------------------------------------------------------------------
   provider: simulated
   speed_mps: 0.8
   turn_rate_degps: 60.0
-  # 5-thruster layout (Phase 1).
-  #   gpio      = ESP32 pin for the ESP32 provider (METADATA only —
-  #               the Raspberry Pi never drives these pins).
+  # 5-thruster layout (Phase 1). DO NOT change this mapping.
+  #   gpio      = ESP32 pin (metadata — the Raspberry Pi never drives these pins).
   #   direction = physical motor sign (+1/-1). Default +1. Verify each motor
   #               on the real ROV and flip here if a motor is mounted reversed.
   motors:
@@ -30,14 +41,19 @@ thrusters:
       gpio: 26
       direction: 1
 
-  # Phase 2 (Part A): ESP32 ESC controller link.
+  # Phase 2: ESP32 ESC controller link.
   # Everything here is read from config — nothing is hardcoded in Python.
+  # The UART protocol matches the flashed ESP32 firmware exactly.
   esp32:
-    # Serial device of the USB-UART adapter connected to the ESP32. Prefer the
-    # stable /dev/serial/by-id/ symlink over /dev/ttyUSB0.
+    # Serial device of the USB-UART adapter connected to the ESP32 (RX=GPIO16,
+    # TX=GPIO17 at 460800 baud). Prefer the stable /dev/serial/by-id/ symlink
+    # over /dev/ttyUSB0.
     serial_port: "/dev/ttyUSB0"
-    baudrate: 460800
-    timeout_ms: 100           # read/write timeout on the serial port
-    command_rate_hz: 50       # max MOTOR_COMMAND frames per second to the ESP32
-    heartbeat_timeout_ms: 250 # no frame from the ESP32 for this long -> link stale
-    reconnect_interval_s: 1.0 # min seconds between serial (re)open attempts
+    baudrate: 460800           # ESP32 firmware UART_BAUDRATE
+    timeout_ms: 100            # read/write timeout on the serial port
+    command_rate_hz: 50        # stable MOTOR_COMMAND stream rate to the ESP32
+                               # (the ESP32 250 ms watchdog needs >= 4 Hz)
+    heartbeat_timeout_ms: 1500 # no frame from the ESP32 for this long -> link
+                               # STALE -> Pi-side failsafe clamps to zero.
+                               # ESP32 sends a STATUS frame every 500 ms.
+    reconnect_interval_s: 1.0  # min seconds between serial (re)open attempts
