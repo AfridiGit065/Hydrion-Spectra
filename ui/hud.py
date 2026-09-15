@@ -1,4 +1,4 @@
-"""HUD overlays drawn into the video frame (Hydrion Spectra style).
+"""HUD overlays drawn into the video frame (DUBO style).
 
 Top-center: heading compass. Center: crosshair + pitch ladder. Left-middle:
 depth pillar. Right-middle: altitude pillar. (The sonar map lives in

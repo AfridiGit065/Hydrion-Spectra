@@ -1,4 +1,4 @@
-# Hydrion Spectra — ROV Controller (Raspberry Pi)
+# DUBO — ROV Controller (Raspberry Pi)
 
 Underwater ROV (Remotely Operated Vehicle) control system for Raspberry Pi (Raspberry Pi OS),
 designed as a modular, professional control station. This file is the session handover document:
@@ -26,7 +26,7 @@ simulated provider, ESP32 thread lifecycle verified).
 ## 2. Project Structure
 
 ```
-hydrion-spectra/
+dubo/
 ├── app/                 # Entry point
 │   └── main.py          # RUNS THE APP (launches GUI)
 ├── core/                # Shared framework
@@ -43,7 +43,7 @@ hydrion-spectra/
 │   └── thrusters/       # 5-thruster model + ESP32 UART transport
 │       ├── thruster_manager.py   # ThrusterManager + Esp32ThrusterProvider + SimulatedProvider
 │       └── uart_transport.py     # ESP32 firmware-matched binary frame protocol
-├── ui/                  # GUI (Hydrion Spectra GCS "Dark Ocean" style)
+├── ui/                  # GUI (DUBO GCS "Dark Ocean" style)
 │   ├── main_window.py   # MainWindow — app bar + nav + footer + dashboard + panels
 │   ├── theme.py         # Design tokens (colors/fonts) + global QSS
 │   ├── glass.py         # GlassPanel / StatusPill / NavButton / ValueRow widgets
@@ -103,7 +103,7 @@ python app/main.py
 
 Expected behavior:
 
-1. A window **"HYDRION SPECTRA - ROV Controller"** opens (dark navy "Dark Ocean" theme):
+1. A window **"DUBO - ROV Controller"** opens (dark navy "Dark Ocean" theme):
    - **Top app bar:** brand, pills (ROV / ESP32 / MODE / DEPTH / BATT / E-STOP / LINK / UP).
    - **Left nav rail** (expands on hover): Dashboard, Operations, Sensors, Manipulator, Diagnostics,
      Planner, AI Vision, Logs, Settings, and a LAUNCH MISSION button.
@@ -416,7 +416,7 @@ The ROV controller auto-starts on boot and restarts if it crashes.
 ### Run all tests
 
 ```bash
-cd /path/to/hydrion-spectra
+cd /path/to/dubo
 source .venv/bin/activate
 python -m unittest discover -s tests -v
 ```

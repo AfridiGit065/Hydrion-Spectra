@@ -1,4 +1,4 @@
-"""Circular 3D motion controller (Hydrion Spectra style).
+"""Circular 3D motion controller (DUBO style).
 
 Stick = surge/yaw (the 5-thruster ROV has no sway). The dashed outer ring
 spins to indicate commanded yaw, updated both while dragging and externally

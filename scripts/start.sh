@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install + start the Hydrion-Spectra ROV Controller systemd service.
+# Install + start the DUBO ROV Controller systemd service.
 #
 # Usage:  bash scripts/start.sh        (self-promotes to root via sudo)
 #
@@ -21,7 +21,7 @@ if [[ ${EUID} -ne 0 ]]; then
     exec sudo -p "sudo password for %u: " bash "$0" "$@"
 fi
 
-echo "==> Hydrion-Spectra ROV Controller auto-start"
+echo "==> DUBO ROV Controller auto-start"
 echo "    project root : ${PROJECT_ROOT}"
 
 # --- discover the deployment user + venv python -------------------------------

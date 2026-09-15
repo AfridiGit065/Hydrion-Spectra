@@ -1,4 +1,4 @@
-"""5-thruster thrust model for the Hydrion-Spectra ROV (Phase 1 + Phase 2).
+"""5-thruster thrust model for the DUBO ROV (Phase 1 + Phase 2).
 
 Actual hardware layout (ESP32 GPIO refer to the low-level ESC controller;
 the Raspberry Pi never drives these pins — metadata only):

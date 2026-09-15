@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         self._boot_t = time.time()
         self._cam_size = (0, 0)
 
-        self.setWindowTitle("HYDRION SPECTRA - ROV Controller")
+        self.setWindowTitle("DUBO - ROV Controller")
         self.resize(1440, 820)
 
         self._ctx = {
@@ -158,7 +158,7 @@ class MainWindow(QMainWindow):
         )
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(20, 0, 16, 0)
-        brand = QLabel("HYDRION SPECTRA")
+        brand = QLabel("DUBO")
         brand.setObjectName("Brand")
         lay.addWidget(brand)
         workspace = QLabel("WORKSPACE")
@@ -557,8 +557,8 @@ class MainWindow(QMainWindow):
         self.live.move(m, m)
         self.telemetry_panel.move(m, self.live.y() + self.live.height() + 8)
         self.sonar.move(cw - self.sonar.width() - m, m)
-        thruster_x = cw - self.thruster_panel.width() - m
-        thruster_y = self.sonar.y() + self.sonar.height() + 10
+        thruster_x = m
+        thruster_y = self.telemetry_panel.y() + self.telemetry_panel.height() + 8
         self.thruster_panel.move(thruster_x, thruster_y)
         self.motion_panel.move(thruster_x, thruster_y + self.thruster_panel.height() + 8)
         self.dock.move(max(0, (cw - self.dock.sizeHint().width()) // 2),

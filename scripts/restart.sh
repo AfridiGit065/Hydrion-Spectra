@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restart the Hydrion-Spectra ROV Controller systemd service cleanly.
+# Restart the DUBO ROV Controller systemd service cleanly.
 set -euo pipefail
 
 UNIT_NAME="rov-controller.service"

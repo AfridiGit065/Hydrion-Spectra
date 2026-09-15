@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop the Hydrion-Spectra ROV Controller systemd service cleanly.
+# Stop the DUBO ROV Controller systemd service cleanly.
 #
 # Only STOPS the running service. Auto-start stays enabled (it will come back
 # at next boot — that is the point). To remove auto-start completely use:
